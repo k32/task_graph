@@ -41,6 +41,7 @@
         , data :: term()
         , rank = 0 :: non_neg_integer()         %% How many tasks depend on this one
         , dependencies = 0 :: non_neg_integer() %% How many dependencies this task has
+%%        , been_here = 0 :: 0..1                 %% Circular dependency detection
         }).
 
 -define(INDEPENDENT,
@@ -49,6 +50,7 @@
                , _data = '_'
                , _rank = '_'
                , _dependencies = 0
+%%               , _been_here = '_'
                }).
 
 -record(task_graph,
@@ -103,42 +105,47 @@ add_tasks(G, Tasks) ->
                             | {error, circular_dependencies}
                             | {error, missing_vertex, task_id()}.
 add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
-    Independent0 = ets:match(VV, ?INDEPENDENT),
-    Independent = map_sets:from_list(lists:flatten(Independent0)),
     try
-        lists:foldl(
-          fun({From, To}, Acc) ->
-              Acc1 = map_sets:del_element(To, Acc),
-              case map_sets:size(Acc1) of
-                  0 ->
-                      throw(circular_dependencies);
-                  _ ->
-                      OldDeps = case ets:take(EE, From) of
-                                    [] -> map_sets:new();
-                                    [{From, S}] -> S
-                                end,
-                      case map_sets:is_element(To, OldDeps) of
-                          false ->
-                              %% Increase rank of the parent task
-                              ets:update_counter(VV, From, {#vertex.rank, 1}),
-                              %% Increase the number of dependencies
-                              ets:update_counter(VV, To, {#vertex.dependencies, 1});
-                          true ->
-                              %% Avoid double-increasing counters
-                              ok
-                      end,
-                      ets:insert(EE, {From, map_sets:add_element(To, OldDeps)})
-              end,
-              Acc1
+        %% Add edges
+        lists:foreach(
+          fun({From, To}) ->
+                  case ets:lookup(VV, From) of
+                      [] ->
+                          throw({missing_vertex, From});
+                      _ ->
+                          ok
+                  end,
+                  case ets:lookup(VV, To) of
+                      [] ->
+                          throw({missing_vertex, To});
+                      _ ->
+                          ok
+                  end,
+                  OldDeps = case ets:take(EE, From) of
+                                [] -> map_sets:new();
+                                [{From, S}] -> S
+                            end,
+                  case map_sets:is_element(To, OldDeps) of
+                      false ->
+                          %% Increase rank of the parent task
+                          ets:update_counter(VV, From, {#vertex.rank, 1}),
+                          %% Increase the number of dependencies
+                          ets:update_counter(VV, To, {#vertex.dependencies, 1});
+                      true ->
+                          %% Avoid double-increasing counters
+                          ok
+                  end,
+                  ets:insert(EE, {From, map_sets:add_element(To, OldDeps)}),
+                  %% TODO: This is slow and inefficient...
+                  check_cycles(EE, map_sets:new(), From)
           end,
-          Independent,
           Deps),
         {ok, G}
     catch
-        circular_dependencies ->
-            {error, circular_dependencies};
-        missing_vertex ->
-            {error, missing_vertex}
+        {circular_dependencies, Cycle} ->
+            {error, circular_dependencies, Cycle};
+        {missing_vertex, Id} ->
+            {error, missing_vertex, Id}
     end.
 
 -spec expand(task_graph(), tasks()) -> {ok, task_graph()} | {error, term()}.
@@ -157,6 +164,25 @@ is_empty(G) ->
             true;
         _Val ->
             false
+    end.
+
+%% TODO make it more efficient
+check_cycles(Edges, Visited, Vertex) ->
+    case map_sets:is_element(Vertex, Visited) of
+        true ->
+            throw({circular_dependencies, [Vertex|map_sets:to_list(Visited)]});
+        false ->
+            Visited2 = map_sets:add_element(Vertex, Visited),
+            Children = case ets:lookup(Edges, Vertex) of
+                           [] ->
+                               [];
+                           [{Vertex, Set}] ->
+                               map_sets:to_list(Set)
+                       end,
+            lists:foreach( fun(Child) ->
+                                   check_cycles(Edges, Visited2, Child)
+                           end
+                         , Children)
     end.
 
 -spec search_tasks( task_graph()

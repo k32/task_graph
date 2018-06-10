@@ -49,17 +49,29 @@
                ) -> {ok, term()} | {error, term()}.
 run_graph(TaskName, PoolSizes, Tasks) ->
     EventMgr = undefined,
-    {ok, Pid} = gen_server:start( {local, TaskName}
-                                , ?MODULE
-                                , {TaskName, EventMgr, PoolSizes, Tasks, self()}
-                                , []
-                                ),
-    Ref = monitor(process, Pid),
-    receive
-        {result, Pid, Result} ->
-            Result;
-        {'DOWN', Ref, process, Pid, Reason} ->
-            {error, {internal_error, Reason}}
+    Ret = gen_server:start( {local, TaskName}
+                          , ?MODULE
+                          , {TaskName, EventMgr, PoolSizes, Tasks, self()}
+                          , []
+                          ),
+    case Ret of
+        {ok, Pid} ->
+            Ref = monitor(process, Pid),
+            receive
+                {result, Pid, Result} ->
+                    %% Make sure gen_server terminated:
+                    receive
+                        {'DOWN', Ref, process, Pid, _} ->
+                            ok
+                    after 1000 ->
+                            error({timeout_waiting_for, Pid})
+                    end,
+                    Result;
+                {'DOWN', Ref, process, Pid, Reason} ->
+                    {error, {internal_error, Reason}}
+            end;
+        Err ->
+            Err
     end.
 
 %%%===================================================================
@@ -68,15 +80,20 @@ run_graph(TaskName, PoolSizes, Tasks) ->
 
 init({TaskName, EventMgr, PoolSizes, {Nodes, Edges}, Parent}) ->
     Graph = task_graph_lib:new_graph(TaskName),
-    {ok, Graph1} = task_graph_lib:add_tasks(Graph, Nodes),
-    {ok, Graph2} = task_graph_lib:add_dependencies(Graph1, Edges),
-    %% io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
-    maybe_pop_tasks(),
-    {ok, #state{ graph = Graph2
-               , workers = #{}
-               %% , result = #{}
-               , parent = Parent
-               }}.
+    try
+        {ok, Graph1} = task_graph_lib:add_tasks(Graph, Nodes),
+        {ok, Graph2} = task_graph_lib:add_dependencies(Graph1, Edges),
+%%        io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
+        maybe_pop_tasks(),
+        {ok, #state{ graph = Graph2
+                   , workers = #{}
+                   %% , result = #{}
+                   , parent = Parent
+                   }}
+    catch
+        _:{badmatch,{error, circular_dependencies, Cycle}} ->
+            {stop, {topology_error, Cycle}}
+    end.
 
 handle_call(_Request, _From, State) ->
     Reply = ok,

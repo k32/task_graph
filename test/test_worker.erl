@@ -24,7 +24,6 @@ run_task(State, Ref, #{deps := Deps}) ->
             error({unresolved_dependencies, Ref, Deps})
     end,
     ets:insert(?TEST_TABLE, #test_table{task_id = Ref}),
-    timer:sleep(5),
     {ok, {}}.
 
 check_deps(Deps) ->

@@ -7,6 +7,7 @@
 
 %% Testcases:
 -export([ t_topology_succ/1
+        , t_topology/1
         ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -15,11 +16,11 @@
 -include("task_graph_test.hrl").
 
 all() ->
-    [t_topology_succ].
+    [t_topology, t_topology_succ].
 
--define(TIMEOUT, 300).
--define(NUMTESTS, 300).
--define(SIZE, 100).
+-define(TIMEOUT, 60).
+-define(NUMTESTS, 1000).
+-define(SIZE, 1000).
 
 -define(DAG, list({nat(), nat()})).
 
@@ -38,11 +39,45 @@ all() ->
         end).
 
 error_handling() ->
-    ?FORALL({L, NumErrors}, {?DAG, range(1, 5)},
+    ?FORALL({L, NumErrors}, {?DAG, range(1, 10)},
             begin
                 DAG = make_DAG(L),
                 %% Inject errors:
                 todo
+            end).
+
+topology() ->
+    ?FORALL(L0, list({nat(), nat()}),
+            begin
+                %% Shrink vertex space a little to get more interesting graphs:
+                L1 = [{N div 2, M div 2} || {N, M} <- L0],
+                Edges = lists:filter(fun({A, B}) -> A /= B end, L1),
+                Vertices = lists:flatten([tuple_to_list(I) || I <- Edges]),
+                DG = digraph:new(),
+                lists:foreach( fun(V) ->
+                                       digraph:add_vertex(DG, V)
+                               end
+                             , Vertices),
+                lists:foreach( fun({From, To}) ->
+                                       digraph:add_edge(DG, From, To)
+                               end
+                             , Edges),
+                Acyclic = digraph_utils:is_acyclic(DG),
+                digraph:delete(DG),
+                Vertices2 = [#task{ task_id = I
+                                  , worker_module = test_worker
+                                  , data = #{deps => []}
+                                  } || I <- Vertices],
+                Result = task_graph:run_graph( foo
+                                             , undefined
+                                             , {Vertices2, Edges}
+                                             ),
+                case {Acyclic, Result} of
+                    {true, {ok, _}} ->
+                        true;
+                    {false, {error, {topology_error, _}}} ->
+                        true
+                end
             end).
 
 topology_succ() ->
@@ -61,9 +96,15 @@ topology_succ() ->
                                     , element(1, DAG))
             end).
 
-%% Test that dependencies are resolved correctly
+%% Test that dependencies are resolved in a correct order and all
+%% tasks are executed for any proper acyclic graph
 t_topology_succ(_Config) ->
     ?RUN_PROP(topology_succ),
+    ok.
+
+%% Test that cyclic dependencies can be detected
+t_topology(_Config) ->
+    ?RUN_PROP(topology),
     ok.
 
 make_DAG(L0) ->
