@@ -117,11 +117,17 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
                                     [] -> map_sets:new();
                                     [{From, S}] -> S
                                 end,
-                      ets:insert(EE, {From, map_sets:add_element(To, OldDeps)}),
-                      %% Increase rank of the parent task
-                      ets:update_counter(VV, From, {#vertex.rank, 1}),
-                      %% Increase the number of dependencies
-                      ets:update_counter(VV, To, {#vertex.dependencies, 1})
+                      case map_sets:is_element(To, OldDeps) of
+                          false ->
+                              %% Increase rank of the parent task
+                              ets:update_counter(VV, From, {#vertex.rank, 1}),
+                              %% Increase the number of dependencies
+                              ets:update_counter(VV, To, {#vertex.dependencies, 1});
+                          true ->
+                              %% Avoid double-increasing counters
+                              ok
+                      end,
+                      ets:insert(EE, {From, map_sets:add_element(To, OldDeps)})
               end,
               Acc1
           end,
@@ -176,11 +182,18 @@ search_tasks(#task_graph{vertices = VV}, ExcludedModules, ExcludedTasks) ->
 
 -spec print_graph(task_graph()) -> iolist().
 print_graph(#task_graph{vertices = VV, edges = EE}) ->
-    Vertices = [I#vertex.task_id || I <- ets:tab2list(VV)],
+    Vertices = [[I, I, R, D] || #vertex{ task_id = I
+                                       , rank = R
+                                       , dependencies = D
+                                       } <- ets:tab2list(VV)
+               ],
     Edges = [{From, To} || {From, Deps} <- ets:tab2list(EE)
                          , To <- map_sets:to_list(Deps)],
-    [ "digraph G {~n  "
-    , lists:map( fun(A) -> io_lib:format("~p; ", [A]) end, Vertices),
+    [ "digraph G {\n"
+    , lists:map( fun(A) ->
+                         io_lib:format("  ~p[label=\"~p[rank=~p,deps=~p]\"];\n", A)
+                 end
+               , Vertices)
     , "\n"
     , lists:map( fun({A, B}) -> io_lib:format("  ~p -> ~p;~n", [A, B]) end
                , Edges)

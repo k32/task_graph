@@ -28,6 +28,7 @@
         { graph                      :: task_graph_lib:graph()
         , event_sink                 :: event_mgr()
         , current_tasks = #{}        :: #{task_graph_lib:task_id() => pid()}
+        , failed_tasks = #{}         :: #{task_graph_lib:task_id() => term()}
         , workers                    :: #{task_graph_lib:worker_module() => #worker_pool{}}
         %% , results    :: #{task_id() => term()}
         , parent                     :: pid()
@@ -45,7 +46,7 @@
 %%               , event_mgr()
                , #{task_graph_lib:worker_module() => non_neg_integer()}
                , task_manager_lib:tasks()
-               ) -> ok | {error, term()}.
+               ) -> {ok, term()} | {error, term()}.
 run_graph(TaskName, PoolSizes, Tasks) ->
     EventMgr = undefined,
     {ok, Pid} = gen_server:start( {local, TaskName}
@@ -56,12 +57,9 @@ run_graph(TaskName, PoolSizes, Tasks) ->
     Ref = monitor(process, Pid),
     receive
         {result, Pid, Result} ->
-            {ok, Result};
+            Result;
         {'DOWN', Ref, process, Pid, Reason} ->
-            error_logger:error_msg( "Task graph ~p terminated with reason ~p~n"
-                                  , [Reason]
-                                  ),
-            {error, internal_error}
+            {error, {internal_error, Reason}}
     end.
 
 %%%===================================================================
@@ -72,6 +70,7 @@ init({TaskName, EventMgr, PoolSizes, {Nodes, Edges}, Parent}) ->
     Graph = task_graph_lib:new_graph(TaskName),
     {ok, Graph1} = task_graph_lib:add_tasks(Graph, Nodes),
     {ok, Graph2} = task_graph_lib:add_dependencies(Graph1, Edges),
+    %% io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
     maybe_pop_tasks(),
     {ok, #state{ graph = Graph2
                , workers = #{}
@@ -84,59 +83,77 @@ handle_call(_Request, _From, State) ->
     {reply, Reply, State}.
 
 handle_cast({complete_task, Ref, _Success = false, Return, _}, State) ->
-    event({error, Ref, Return}, State),
-    complete_graph({error, Ref, Return}, State);
+    maybe_pop_tasks(),
+    {noreply, push_error(Ref, Return, State)};
 handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
     #state{ graph = G0
           } = State,
     event({complete_task, Ref}, State),
-    case check_new_tasks(false, NewTasks, Ref) of
-        true ->
-            {ok, G1} = task_graph_lib:complete_task(G0, Ref),
-            State1 = State#state{ graph = G1
-                                , current_tasks =
-                                      maps:remove(Ref, State#state.current_tasks)
-                                },
-            case task_graph_lib:is_empty(G1) of
-                true ->
-                    complete_graph(ok, State1);
-                false ->
-                    maybe_pop_tasks(),
-                    {noreply, State1}
-            end;
-        false ->
-            event({error, Ref, {topology_error, NewTasks}}, State),
-            complete_graph({error, Ref, {topology_error, NewTasks}}, State)
-    end;
+    State1 =
+        case check_new_tasks(false, NewTasks, Ref) of
+            true ->
+                {ok, G1} = task_graph_lib:complete_task(G0, Ref),
+                State#state{ graph = G1
+                           , current_tasks =
+                                 maps:remove(Ref, State#state.current_tasks)
+                           };
+            false ->
+                %% Dynamically added tasks break the topology
+                push_error(Ref, {topology_error, NewTasks}, State)
+        end,
+    maybe_pop_tasks(),
+    {noreply, State1};
 handle_cast({defer_task, Ref, NewTasks}, State) ->
     #state{ graph = G0
           , current_tasks = Curr
           } = State,
-    case {check_new_tasks(true, NewTasks, Ref), task_graph_lib:expand(G0, NewTasks)} of
-        {true, {ok, G1}} ->
-            State1 = State#state{ current_tasks = map_sets:del_element(Ref, Curr)
-                                , graph = G1
-                                },
-            {noreply, State1};
-        _ ->
-            event({error, Ref, {topology_error, NewTasks}}, State),
-            complete_graph({error, Ref, {topology_error, NewTasks}}, State)
-    end;
+    State1 =
+        case {check_new_tasks(true, NewTasks, Ref), task_graph_lib:expand(G0, NewTasks)} of
+            {true, {ok, G1}} ->
+                State#state{ current_tasks = map_sets:del_element(Ref, Curr)
+                           , graph = G1
+                           };
+            _ ->
+                push_error(Ref, {topology_error, NewTasks}, State)
+        end,
+    maybe_pop_tasks(),
+    {noreply, State1};
 handle_cast(maybe_pop_tasks, State) ->
     #state{ graph = G
           , current_tasks = CurrentlyRunningTasks
           } = State,
-    SaturatedSchedulers = map_sets:new(),
-    {ok, Tasks} = task_graph_lib:search_tasks( G
-                                             , SaturatedSchedulers
-                                             , CurrentlyRunningTasks
-                                             ),
-    event({scheduled_tasks, Tasks}, State),
-    State2 = lists:foldl( fun run_task/2
-                        , State
-                        , Tasks
-                        ),
-    {noreply, State2}.
+    SaturatedSchedulers = map_sets:new(), %% TODO
+    event(pop_tasks, State),
+    case is_success(State) of
+        true ->
+            %% There are no failed tasks, proceed
+            {ok, Tasks} = task_graph_lib:search_tasks( G
+                                                     , SaturatedSchedulers
+                                                     , CurrentlyRunningTasks
+                                                     );
+        false ->
+            %% Something's failed, don't schedule new tasks
+            Tasks = []
+    end,
+    case Tasks of
+        [] ->
+            case is_complete(State) of
+                true ->
+                    %% Task graph
+                    complete_graph(State);
+                false ->
+                    %% All tasks have unresolved dependencies, wait
+                    {noreply, State}
+            end;
+        _ ->
+            %% Schedule new tasks
+            event({scheduled_tasks, Tasks}, State),
+            State2 = lists:foldl( fun run_task/2
+                                , State
+                                , Tasks
+                                ),
+            {noreply, State2}
+    end.
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -170,18 +187,41 @@ check_new_tasks(Defer, {Vertices, Edges}, ParentTask) ->
     map_sets:is_subset(Deps, New).
 
 event(Term, State) ->
-    io:format("Event: ~p~nState: ~p~n", [Term, State]),
+    %% io:format("Event: ~p~nState~p~n", [Term, State]),
+    %% case State of
+    %%     #state{graph = G} ->
+    %%         io:format(user, "~s", [task_graph_lib:print_graph(G)]);
+    %%     _ ->
+    %%         ok
+    %% end,
     todo.
-%% event({Type, Task, Data}, State) ->
-%%     todo.
 
-complete_graph(_ok, State = #state{parent = Pid}) ->
-    event({graph_complete, self()}, State),
-    Pid ! {result, self(), ok},
+complete_graph(State = #state{parent = Pid, failed_tasks = Failed}) ->
+    %% Assert:
+    #{} = State#state.current_tasks,
+    Result = case is_success(State) of
+                 true ->
+                     {ok, Failed};
+                 false ->
+                     {error, Failed}
+             end,
+    event({graph_complete, self(), Result}, State),
+    Pid ! {result, self(), Result},
     {stop, normal, State}.
-%% complete_graph({error, Task, Data}, State = #state{parent = Pid}) ->
-%%     Pid ! {result, self(), {error, Task, Data}},
-%%     exit(stop).
+
+is_success(State) ->
+    maps:size(State#state.failed_tasks) == 0.
+
+is_complete(State) ->
+    maps:size(State#state.current_tasks) == 0.
+
+push_error(Ref, Error, State) ->
+    OldFailedTasks = State#state.failed_tasks,
+    OldCurrentTasks = State#state.current_tasks,
+    event({task_failed, Ref, Error}, State),
+    State#state{ failed_tasks = OldFailedTasks#{Ref => Error}
+               , current_tasks = maps:remove(Ref, OldCurrentTasks)
+               }.
 
 maybe_pop_tasks() ->
     gen_server:cast(self(), maybe_pop_tasks).
@@ -209,13 +249,13 @@ run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT}) ->
     State#state{current_tasks = TT#{Ref => Pid}}.
 
 -spec spawn_worker(task_graph_lib:task(), term(), event_mgr()) -> pid().
-spawn_worker(Task = #task{task_id = Ref, worker_module = Mod}, WorkerState, EventMgr) ->
+spawn_worker(#task{task_id = Ref, worker_module = Mod, data = Data}, WorkerState, EventMgr) ->
     Parent = self(),
     spawn_link(
       fun() ->
           event({spawn_task, Ref, self()}, EventMgr),
           try
-              case Mod:run_task(WorkerState, Task) of
+              case Mod:run_task(WorkerState, Ref, Data) of
                   {ok, Result} ->
                       complete_task(Parent, Ref, true, Result);
                   {ok, Result, NewTasks} ->
@@ -229,7 +269,7 @@ spawn_worker(Task = #task{task_id = Ref, worker_module = Mod}, WorkerState, Even
               _:Err ->
                   complete_task( Parent
                                , Ref
-                               , false
+                               , _success = false
                                , {uncaught_exception, Err, erlang:get_stacktrace()}
                                )
           end
