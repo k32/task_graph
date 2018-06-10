@@ -70,13 +70,7 @@ run_graph(TaskName, PoolSizes, Tasks) ->
 
 init({TaskName, EventMgr, PoolSizes, {Nodes, Edges}, Parent}) ->
     Graph = task_graph_lib:new_graph(TaskName),
-    Graph1 = lists:foldl( fun(Task, Acc) ->
-                                  {ok, G2} = task_graph_lib:add_task(Acc, Task),
-                                  G2
-                          end
-                        , Graph
-                        , Nodes
-                        ),
+    {ok, Graph1} = task_graph_lib:add_tasks(Graph, Nodes),
     {ok, Graph2} = task_graph_lib:add_dependencies(Graph1, Edges),
     maybe_pop_tasks(),
     {ok, #state{ graph = Graph2
@@ -99,7 +93,6 @@ handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
     case check_new_tasks(false, NewTasks, Ref) of
         true ->
             {ok, G1} = task_graph_lib:complete_task(G0, Ref),
-            io:format("OHAYO after ~p~n", [ets:tab2list(G1)]),
             State1 = State#state{ graph = G1
                                 , current_tasks =
                                       maps:remove(Ref, State#state.current_tasks)
@@ -112,6 +105,20 @@ handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
                     {noreply, State1}
             end;
         false ->
+            event({error, Ref, {topology_error, NewTasks}}, State),
+            complete_graph({error, Ref, {topology_error, NewTasks}}, State)
+    end;
+handle_cast({defer_task, Ref, NewTasks}, State) ->
+    #state{ graph = G0
+          , current_tasks = Curr
+          } = State,
+    case {check_new_tasks(true, NewTasks, Ref), task_graph_lib:expand(G0, NewTasks)} of
+        {true, {ok, G1}} ->
+            State1 = State#state{ current_tasks = map_sets:del_element(Ref, Curr)
+                                , graph = G1
+                                },
+            {noreply, State1};
+        _ ->
             event({error, Ref, {topology_error, NewTasks}}, State),
             complete_graph({error, Ref, {topology_error, NewTasks}}, State)
     end;
@@ -134,7 +141,8 @@ handle_cast(maybe_pop_tasks, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    task_graph_lib:delete_graph(State#state.graph),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -163,12 +171,6 @@ check_new_tasks(Defer, {Vertices, Edges}, ParentTask) ->
 
 event(Term, State) ->
     io:format("Event: ~p~nState: ~p~n", [Term, State]),
-    case State of
-        #state{graph = G} ->
-            task_graph_lib:print_graph(G);
-        _ ->
-            ok
-    end,
     todo.
 %% event({Type, Task, Data}, State) ->
 %%     todo.

@@ -21,8 +21,6 @@ all() ->
 
 -define(RUN_PROP(PROP),
         begin
-            %% Workaround against ct's wonderful features:
-            group_leader(whereis(user), self()),
             true = proper:quickcheck( PROP()
                                     , [{numtests, ?NUMTESTS}]
                                     )
@@ -31,35 +29,28 @@ all() ->
 topology() ->
     ?FORALL(L, ?DAG,
             begin
-                DAG = make_dag(L),
+                DAG = make_DAG(L),
                 {ok, _} = task_graph:run_graph( foo
                                               , undefined
                                               , DAG
-                                              )
+                                              ),
+                true
             end).
 
 t_topology(_Config) ->
-    ?RUN_PROP(topology).
+    ?RUN_PROP(topology),
+    ok.
 
-make_dag(L) ->
-    Edges = [{N, N + M + 1} || {N, M} <- L],
-    print_graph(Edges),
+make_DAG(L) ->
+    Edges = [{N, N + M} || {N, M} <- L, M>0],
+    Singletons = [N || {N, 0} <- L],
+    Dependent = lists:flatten(lists:map(fun tuple_to_list/1, Edges)),
     Vertices = [#task{ task_id = I
                      , worker_module = test_worker
                      , data = {}
                      }
-                || I <- lists:usort(lists:flatten(lists:map( fun tuple_to_list/1
-                                                           , Edges
-                                                           )))],
+                || I <- lists:usort(Singletons ++ Dependent)],
     {Vertices, Edges}.
-
-print_graph(Edges) ->
-    io:format("digraph G {~n"),
-    lists:foreach( fun({A, B}) ->
-                       io:format("  ~p -> ~p;~n", [A, B])
-                   end
-                 , Edges),
-    io:format("}~n").
 
 suite() ->
     [{timetrap,{seconds, ?TIMEOUT}}].
