@@ -5,7 +5,9 @@
 -include_lib("task_graph/include/task_graph.hrl").
 
 %% API
--export([run_graph/3]).
+-export([ run_graph/3
+        , run_graph/2
+        ]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -25,13 +27,14 @@
         }).
 
 -record(state,
-        { graph                      :: task_graph_lib:graph()
-        , event_sink                 :: event_mgr()
-        , current_tasks = #{}        :: #{task_graph_lib:task_id() => pid()}
-        , failed_tasks = #{}         :: #{task_graph_lib:task_id() => term()}
-        , workers                    :: #{task_graph_lib:worker_module() => #worker_pool{}}
+        { graph                            :: task_graph_lib:graph()
+        , event_sink                       :: event_mgr()
+        , current_tasks = #{}              :: #{task_graph_lib:task_id() => pid()}
+        , failed_tasks = #{}               :: #{task_graph_lib:task_id() => term()}
+        , workers                          :: #{task_graph_lib:task_execute() => #worker_pool{}}
         %% , results    :: #{task_id() => term()}
-        , parent                     :: pid()
+        , parent                           :: pid()
+        , global_job_limit                 :: non_neg_integer() | infinity
         }).
 
 %%%===================================================================
@@ -43,15 +46,20 @@
 %% @end
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
-%%               , event_mgr()
-               , #{task_graph_lib:worker_module() => non_neg_integer()}
                , task_manager_lib:tasks()
                ) -> {ok, term()} | {error, term()}.
-run_graph(TaskName, PoolSizes, Tasks) ->
+run_graph(TaskName, Tasks) ->
+    run_graph(TaskName, #{}, Tasks).
+
+-spec run_graph( atom()
+               , #{atom() => term()}
+               , task_manager_lib:tasks()
+               ) -> {ok, term()} | {error, term()}.
+run_graph(TaskName, Settings, Tasks) ->
     EventMgr = undefined,
     Ret = gen_server:start( {local, TaskName}
                           , ?MODULE
-                          , {TaskName, EventMgr, PoolSizes, Tasks, self()}
+                          , {TaskName, EventMgr, Settings, Tasks, self()}
                           , []
                           ),
     case Ret of
@@ -59,7 +67,7 @@ run_graph(TaskName, PoolSizes, Tasks) ->
             Ref = monitor(process, Pid),
             receive
                 {result, Pid, Result} ->
-                    %% Make sure gen_server terminated:
+                    %% Make sure the server terminated:
                     receive
                         {'DOWN', Ref, process, Pid, _} ->
                             ok
@@ -78,17 +86,19 @@ run_graph(TaskName, PoolSizes, Tasks) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-init({TaskName, EventMgr, PoolSizes, {Nodes, Edges}, Parent}) ->
+init({TaskName, EventMgr, Settings, {Nodes, Edges}, Parent}) ->
     Graph = task_graph_lib:new_graph(TaskName),
     try
         {ok, Graph1} = task_graph_lib:add_tasks(Graph, Nodes),
         {ok, Graph2} = task_graph_lib:add_dependencies(Graph1, Edges),
-%%        io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
+        JobLimit = maps:get(jobs, Settings, infinity),
+        %% io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
         maybe_pop_tasks(),
         {ok, #state{ graph = Graph2
                    , workers = #{}
                    %% , result = #{}
                    , parent = Parent
+                   , global_job_limit = JobLimit
                    }}
     catch
         _:{badmatch,{error, circular_dependencies, Cycle}} ->
@@ -144,10 +154,18 @@ handle_cast(maybe_pop_tasks, State) ->
     case is_success(State) of
         true ->
             %% There are no failed tasks, proceed
-            {ok, Tasks} = task_graph_lib:search_tasks( G
-                                                     , SaturatedSchedulers
-                                                     , CurrentlyRunningTasks
-                                                     );
+            {ok, Tasks0} = task_graph_lib:search_tasks( G
+                                                      , SaturatedSchedulers
+                                                      , CurrentlyRunningTasks
+                                                      ),
+            case State#state.global_job_limit of
+                infinity ->
+                    Tasks = Tasks0;
+                N ->
+                    Tasks = lists:sublist( Tasks0
+                                         , N - maps:size(CurrentlyRunningTasks)
+                                         )
+            end;
         false ->
             %% Something's failed, don't schedule new tasks
             Tasks = []
@@ -266,13 +284,18 @@ run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT}) ->
     State#state{current_tasks = TT#{Ref => Pid}}.
 
 -spec spawn_worker(task_graph_lib:task(), term(), event_mgr()) -> pid().
-spawn_worker(#task{task_id = Ref, worker_module = Mod, data = Data}, WorkerState, EventMgr) ->
+spawn_worker(#task{task_id = Ref, execute = Mod, data = Data}, WorkerState, EventMgr) ->
     Parent = self(),
     spawn_link(
       fun() ->
           event({spawn_task, Ref, self()}, EventMgr),
           try
-              case Mod:run_task(WorkerState, Ref, Data) of
+              Fun = if is_atom(Mod) ->
+                            fun Mod:run_task/3;
+                       is_function(Mod) ->
+                            Mod
+                    end,
+              case Fun(WorkerState, Ref, Data) of
                   {ok, Result} ->
                       complete_task(Parent, Ref, true, Result);
                   {ok, Result, NewTasks} ->

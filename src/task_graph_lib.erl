@@ -12,7 +12,7 @@
 -export_type([ task/0
              , tasks/0
              , task_id/0
-             , worker_module/0
+             , task_execute/0
              , task_graph/0
              ]).
 
@@ -27,7 +27,7 @@
         , print_graph/1
         ]).
 
--type worker_module() :: atom().
+-type task_execute() :: atom() | task_runner:run().
 
 -type task_id() :: term().
 
@@ -37,20 +37,18 @@
 
 -record(vertex,
         { task_id :: task_id()
-        , worker_module :: worker_module()
+        , execute :: task_execute()
         , data :: term()
         , rank = 0 :: non_neg_integer()         %% How many tasks depend on this one
         , dependencies = 0 :: non_neg_integer() %% How many dependencies this task has
-%%        , been_here = 0 :: 0..1                 %% Circular dependency detection
         }).
 
 -define(INDEPENDENT,
         {vertex, _task_id = '$1'
-               , _worker_module = '_'
+               , _execute = '_'
                , _data = '_'
                , _rank = '_'
                , _dependencies = 0
-%%               , _been_here = '_'
                }).
 
 -record(task_graph,
@@ -85,11 +83,11 @@ delete_graph(#task_graph{vertices = V, edges = E}) ->
                     | {error, duplicate_task}.
 add_tasks(G, Tasks) ->
     VV = [#vertex{ task_id = Ref
-                 , worker_module = M
+                 , execute = M
                  , data = D
                  }
           || #task{ task_id = Ref
-                  , worker_module = M
+                  , execute = M
                   , data = D
                   } <- Tasks],
     case ets:insert_new(G#task_graph.vertices, VV) of
@@ -186,18 +184,18 @@ check_cycles(Edges, Visited, Vertex) ->
     end.
 
 -spec search_tasks( task_graph()
-                  , map_sets:set(worker_module())
+                  , map_sets:set(task_execute())
                   , map_sets:set(task_id())
                   ) -> {ok, [task()]}.
 search_tasks(#task_graph{vertices = VV}, ExcludedModules, ExcludedTasks) ->
     Matches = [{ -Rank
                , #task{ task_id = Ref
-                      , worker_module = Mod
+                      , execute = Mod
                       , data = Data
                       }
                }
                || #vertex{ task_id = Ref
-                         , worker_module = Mod
+                         , execute = Mod
                          , data = Data
                          , rank = Rank
                          } <- ets:match_object(VV, ?INDEPENDENT),

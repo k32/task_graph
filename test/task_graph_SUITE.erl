@@ -8,6 +8,7 @@
 %% Testcases:
 -export([ t_topology_succ/1
         , t_topology/1
+        , t_error_handling/1
         ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -16,7 +17,7 @@
 -include("task_graph_test.hrl").
 
 all() ->
-    [t_topology, t_topology_succ].
+    [t_error_handling, t_topology, t_topology_succ].
 
 -define(TIMEOUT, 60).
 -define(NUMTESTS, 1000).
@@ -39,12 +40,24 @@ all() ->
         end).
 
 error_handling() ->
-    ?FORALL({L, NumErrors}, {?DAG, range(1, 10)},
+    ?FORALL({L, Errors}, {?DAG, list({nat(), integer(1, 2)})},
+            ?IMPLIES(length(L) > 0 andalso length(Errors) > 0,
             begin
-                DAG = make_DAG(L),
+                DAG0 = make_DAG(L),
                 %% Inject errors:
-                todo
-            end).
+                DAG = change_random_tasks( Errors
+                                         , fun(1) -> exception;
+                                              (2) -> error
+                                           end
+                                         , DAG0),
+                ExpectedErrors =
+                    [I || #task{task_id = I, data = D} <- element(1, DAG),
+                          D =:= error orelse D =:= exception],
+                {error, Result} = task_graph:run_graph(foo, DAG),
+                map_sets:is_subset( Result
+                                  , map_sets:from_list(ExpectedErrors)
+                                  )
+            end)).
 
 topology() ->
     ?FORALL(L0, list({nat(), nat()}),
@@ -65,13 +78,10 @@ topology() ->
                 Acyclic = digraph_utils:is_acyclic(DG),
                 digraph:delete(DG),
                 Vertices2 = [#task{ task_id = I
-                                  , worker_module = test_worker
+                                  , execute = test_worker
                                   , data = #{deps => []}
                                   } || I <- Vertices],
-                Result = task_graph:run_graph( foo
-                                             , undefined
-                                             , {Vertices2, Edges}
-                                             ),
+                Result = task_graph:run_graph(foo, {Vertices2, Edges}),
                 case {Acyclic, Result} of
                     {true, {ok, _}} ->
                         true;
@@ -84,10 +94,7 @@ topology_succ() ->
     ?FORALL(L, ?DAG,
             begin
                 DAG = make_DAG(L),
-                {ok, _} = task_graph:run_graph( foo
-                                              , undefined
-                                              , DAG
-                                              ),
+                {ok, _} = task_graph:run_graph(foo, DAG),
                 %% Check that all tasks have been executed:
                 AllRun = lists:foldl( fun(#task{task_id = Task}, Acc) ->
                                               Acc andalso ets:member(?TEST_TABLE, Task)
@@ -107,6 +114,11 @@ t_topology(_Config) ->
     ?RUN_PROP(topology),
     ok.
 
+%% Check that errors in the tasks are reported
+t_error_handling(_Config) ->
+    ?RUN_PROP(error_handling),
+    ok.
+
 make_DAG(L0) ->
     %% Shrink vertex space a little to get more interesting graphs:
     L = [{N div 2, M div 4} || {N, M} <- L0],
@@ -114,13 +126,26 @@ make_DAG(L0) ->
     Singletons = [N || {N, 0} <- L],
     Dependent = lists:flatten(lists:map(fun tuple_to_list/1, Edges)),
     Vertices = [#task{ task_id = I
-                     , worker_module = test_worker
+                     , execute = test_worker
                      , data = #{ deps => [From || {From, To} <- Edges, To =:= I]
                                }
                      }
                 || I <- lists:usort(Singletons ++ Dependent)],
     %% io:format(user, "Vertices=~p~nEdges=~p~n", [Vertices, Edges]),
     {Vertices, Edges}.
+
+change_random_tasks(_, _, {[], _} = DAG) ->
+    DAG;
+change_random_tasks(Positions0, Fun, {VV0, EE}) ->
+    Len = length(VV0),
+    Positions = [{Pos rem Len, Data} || {Pos, Data} <- Positions0],
+    VV = lists:foldl( fun({Pos, Data}, Acc) ->
+                              {A, [B|C]} = lists:split(Pos, Acc),
+                              A ++ [B#task{data=Fun(Data)}|C]
+                      end
+                    , VV0
+                    , Positions),
+    {VV, EE}.
 
 suite() ->
     [{timetrap,{seconds, ?TIMEOUT}}].
