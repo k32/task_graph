@@ -21,6 +21,9 @@
                    | pid()
                    | undefined.
 
+-type settings_key() :: global_job_limit
+                      | event_handlers.
+
 -record(worker_pool,
         { workers :: #{pid() => worker_state()}
         , cap :: non_neg_integer() | unlimited
@@ -28,7 +31,7 @@
 
 -record(state,
         { graph                            :: task_graph_lib:graph()
-        , event_sink                       :: event_mgr()
+        , event_mgr                        :: event_mgr()
         , current_tasks = #{}              :: #{task_graph_lib:task_id() => pid()}
         , failed_tasks = #{}               :: #{task_graph_lib:task_id() => term()}
         , workers                          :: #{task_graph_lib:task_execute() => #worker_pool{}}
@@ -52,11 +55,16 @@ run_graph(TaskName, Tasks) ->
     run_graph(TaskName, #{}, Tasks).
 
 -spec run_graph( atom()
-               , #{atom() => term()}
+               , #{settings_key() => term()}
                , task_manager_lib:tasks()
                ) -> {ok, term()} | {error, term()}.
 run_graph(TaskName, Settings, Tasks) ->
-    EventMgr = undefined,
+    {ok, EventMgr} = gen_event:start_link(),
+    lists:foreach( fun({Handler, Args}) ->
+                           gen_event:add_handler(EventMgr, Handler, Args)
+                   end
+                 , maps:get(event_handlers, Settings, [])
+                 ),
     Ret = gen_server:start( {local, TaskName}
                           , ?MODULE
                           , {TaskName, EventMgr, Settings, Tasks, self()}
@@ -67,11 +75,14 @@ run_graph(TaskName, Settings, Tasks) ->
             Ref = monitor(process, Pid),
             receive
                 {result, Pid, Result} ->
+                    gen_event:stop(EventMgr),
                     %% Make sure the server terminated:
                     receive
                         {'DOWN', Ref, process, Pid, _} ->
                             ok
                     after 1000 ->
+                            %% Should not happen
+                            exit(Pid, kill),
                             error({timeout_waiting_for, Pid})
                     end,
                     Result;
@@ -96,6 +107,7 @@ init({TaskName, EventMgr, Settings, {Nodes, Edges}, Parent}) ->
         maybe_pop_tasks(),
         {ok, #state{ graph = Graph2
                    , workers = #{}
+                   , event_mgr = EventMgr
                    %% , result = #{}
                    , parent = Parent
                    , global_job_limit = JobLimit
@@ -221,15 +233,10 @@ check_new_tasks(Defer, {Vertices, Edges}, ParentTask) ->
     Deps = map_sets:from_list([To || {_, To} <- Edges]),
     map_sets:is_subset(Deps, New).
 
-event(Term, State) ->
-    %% io:format("Event: ~p~nState~p~n", [Term, State]),
-    %% case State of
-    %%     #state{graph = G} ->
-    %%         io:format(user, "~s", [task_graph_lib:print_graph(G)]);
-    %%     _ ->
-    %%         ok
-    %% end,
-    todo.
+event(Term, #state{event_mgr = EventMgr}) ->
+    gen_event:notify(EventMgr, Term);
+event(Term, EventMgr) when is_pid(EventMgr) ->
+    gen_event:notify(EventMgr, Term).
 
 complete_graph(State = #state{parent = Pid, failed_tasks = Failed}) ->
     %% Assert:
@@ -280,7 +287,7 @@ defer_task(Parent, Ref, NewTasks) ->
 
 -spec run_task(task_graph_lib:task(), #state{}) -> #state{}.
 run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT}) ->
-    Pid = spawn_worker(Task, todo_undefined, State#state.event_sink),
+    Pid = spawn_worker(Task, todo_undefined, State#state.event_mgr),
     State#state{current_tasks = TT#{Ref => Pid}}.
 
 -spec spawn_worker(task_graph_lib:task(), term(), event_mgr()) -> pid().

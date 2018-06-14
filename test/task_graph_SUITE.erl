@@ -49,7 +49,8 @@ error_handling() ->
                                          , fun(1) -> exception;
                                               (2) -> error
                                            end
-                                         , DAG0),
+                                         , DAG0
+                                         ),
                 ExpectedErrors =
                     [I || #task{task_id = I, data = D} <- element(1, DAG),
                           D =:= error orelse D =:= exception],
@@ -70,11 +71,13 @@ topology() ->
                 lists:foreach( fun(V) ->
                                        digraph:add_vertex(DG, V)
                                end
-                             , Vertices),
+                             , Vertices
+                             ),
                 lists:foreach( fun({From, To}) ->
                                        digraph:add_edge(DG, From, To)
                                end
-                             , Edges),
+                             , Edges
+                             ),
                 Acyclic = digraph_utils:is_acyclic(DG),
                 digraph:delete(DG),
                 Vertices2 = [#task{ task_id = I
@@ -100,7 +103,8 @@ topology_succ() ->
                                               Acc andalso ets:member(?TEST_TABLE, Task)
                                       end
                                     , true
-                                    , element(1, DAG))
+                                    , element(1, DAG)
+                                    )
             end).
 
 %% Test that dependencies are resolved in a correct order and all
@@ -144,7 +148,8 @@ change_random_tasks(Positions0, Fun, {VV0, EE}) ->
                               A ++ [B#task{data=Fun(Data)}|C]
                       end
                     , VV0
-                    , Positions),
+                    , Positions
+                    ),
     {VV, EE}.
 
 suite() ->
