@@ -21,7 +21,7 @@
                    | pid()
                    | undefined.
 
--type settings_key() :: global_job_limit
+-type settings_key() :: jobs
                       | event_handlers.
 
 -record(worker_pool,
@@ -34,7 +34,8 @@
         , event_mgr                        :: event_mgr()
         , current_tasks = #{}              :: #{task_graph_lib:task_id() => pid()}
         , failed_tasks = #{}               :: #{task_graph_lib:task_id() => term()}
-        , workers                          :: #{task_graph_lib:task_execute() => #worker_pool{}}
+        , workers                          :: #{task_graph_lib:task_execute() =>
+                                                    #worker_pool{}}
         %% , results    :: #{task_id() => term()}
         , parent                           :: pid()
         , global_job_limit                 :: non_neg_integer() | infinity
@@ -75,7 +76,7 @@ run_graph(TaskName, Settings, Tasks) ->
             Ref = monitor(process, Pid),
             receive
                 {result, Pid, Result} ->
-                    gen_event:stop(EventMgr),
+                    gen_event:stop(EventMgr, normal, infinity),
                     %% Make sure the server terminated:
                     receive
                         {'DOWN', Ref, process, Pid, _} ->
@@ -97,15 +98,14 @@ run_graph(TaskName, Settings, Tasks) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-init({TaskName, EventMgr, Settings, {Nodes, Edges}, Parent}) ->
+init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
     Graph = task_graph_lib:new_graph(TaskName),
     try
-        {ok, Graph1} = task_graph_lib:add_tasks(Graph, Nodes),
-        {ok, Graph2} = task_graph_lib:add_dependencies(Graph1, Edges),
+        {ok, Graph1} = push_tasks(Tasks, Graph, EventMgr),
         JobLimit = maps:get(jobs, Settings, infinity),
         %% io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
         maybe_pop_tasks(),
-        {ok, #state{ graph = Graph2
+        {ok, #state{ graph = Graph1
                    , workers = #{}
                    , event_mgr = EventMgr
                    %% , result = #{}
@@ -129,14 +129,17 @@ handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
           } = State,
     event({complete_task, Ref}, State),
     State1 =
-        case check_new_tasks(false, NewTasks, Ref) of
-            true ->
-                {ok, G1} = task_graph_lib:complete_task(G0, Ref),
-                State#state{ graph = G1
+        case {check_new_tasks(false, NewTasks, Ref), push_tasks(NewTasks, State)} of
+            {true, {ok, G1}} ->
+                {ok, G2} = task_graph_lib:complete_task(G1, Ref),
+                State#state{ graph = G2
                            , current_tasks =
                                  maps:remove(Ref, State#state.current_tasks)
                            };
-            false ->
+            {true, Err= {error, _}} ->
+                %% Dynamically added tasks are malformed or break topology
+                push_error(Ref, Err, State);
+            {false, _} ->
                 %% Dynamically added tasks break the topology
                 push_error(Ref, {topology_error, NewTasks}, State)
         end,
@@ -147,7 +150,7 @@ handle_cast({defer_task, Ref, NewTasks}, State) ->
           , current_tasks = Curr
           } = State,
     State1 =
-        case {check_new_tasks(true, NewTasks, Ref), task_graph_lib:expand(G0, NewTasks)} of
+        case {check_new_tasks(true, NewTasks, Ref), push_tasks(NewTasks, State)} of
             {true, {ok, G1}} ->
                 State#state{ current_tasks = map_sets:del_element(Ref, Curr)
                            , graph = G1
@@ -215,6 +218,16 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+-spec push_tasks(task_graph_lib:tasks(), #state{}) ->
+                        {ok, task_graph_lib:task_graph()}
+                      | {error, term()}.
+push_tasks(NewTasks, #state{graph = G0, event_mgr = EventMgr}) ->
+    push_tasks(NewTasks, G0, EventMgr).
+push_tasks(NewTasks = {Vertices, Edges}, G0, EventMgr) ->
+    event({add_tasks, Vertices}, EventMgr),
+    event({add_dependencies, Edges}, EventMgr),
+    task_graph_lib:expand(G0, NewTasks).
 
 %% Dynamically added tasks should not introduce new dependencies for
 %% any existing tasks
@@ -291,18 +304,19 @@ run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT}) ->
     State#state{current_tasks = TT#{Ref => Pid}}.
 
 -spec spawn_worker(task_graph_lib:task(), term(), event_mgr()) -> pid().
-spawn_worker(#task{task_id = Ref, execute = Mod, data = Data}, WorkerState, EventMgr) ->
+spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, EventMgr) ->
     Parent = self(),
     spawn_link(
       fun() ->
           event({spawn_task, Ref, self()}, EventMgr),
           try
-              Fun = if is_atom(Mod) ->
-                            fun Mod:run_task/3;
-                       is_function(Mod) ->
-                            Mod
-                    end,
-              case Fun(WorkerState, Ref, Data) of
+              Return =
+                  if is_atom(Exec) ->
+                          Exec:run_task(WorkerState, Ref, Data);
+                     is_function(Exec) ->
+                          Exec(Ref, Data)
+                  end,
+              case Return of
                   {ok, Result} ->
                       complete_task(Parent, Ref, true, Result);
                   {ok, Result, NewTasks} ->

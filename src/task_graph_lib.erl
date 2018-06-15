@@ -41,14 +41,16 @@
         , data :: term()
         , rank = 0 :: non_neg_integer()         %% How many tasks depend on this one
         , dependencies = 0 :: non_neg_integer() %% How many dependencies this task has
+        , complete = false :: boolean()
         }).
 
--define(INDEPENDENT,
+-define(READY_TO_GO,
         {vertex, _task_id = '$1'
                , _execute = '_'
                , _data = '_'
                , _rank = '_'
                , _dependencies = 0
+               , _complete = false
                }).
 
 -record(task_graph,
@@ -82,19 +84,30 @@ delete_graph(#task_graph{vertices = V, edges = E}) ->
                       {ok, task_graph()}
                     | {error, duplicate_task}.
 add_tasks(G, Tasks) ->
-    VV = [#vertex{ task_id = Ref
-                 , execute = M
-                 , data = D
-                 }
-          || #task{ task_id = Ref
-                  , execute = M
-                  , data = D
-                  } <- Tasks],
-    case ets:insert_new(G#task_graph.vertices, VV) of
-        false ->
-            {error, duplicate_task};
-        true ->
-            {ok, G}
+    VV = [task_to_vertex(I) || I <- Tasks],
+    try
+      lists:foreach(
+        fun(V) ->
+           case ets:insert_new(G#task_graph.vertices, V) of
+               false ->
+                   %% Compare old and new task definitions
+                   [OldV] = ets:lookup(G#task_graph.vertices, V#vertex.task_id),
+                   case vertex_to_task(OldV) =:= vertex_to_task(V) of
+                       true ->
+                           %% New definition is the same, I'll allow it
+                           ok;
+                       _ ->
+                           throw(duplicate_task)
+                   end;
+               true ->
+                   ok
+           end
+        end,
+        VV),
+      {ok, G}
+    catch
+        duplicate_task ->
+            {error, duplicate_task}
     end.
 
 %% Note: leaves graph in inconsistent state upon error!
@@ -107,12 +120,13 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
         %% Add edges
         lists:foreach(
           fun({From, To}) ->
-                  case ets:lookup(VV, From) of
-                      [] ->
-                          throw({missing_vertex, From});
-                      _ ->
-                          ok
-                  end,
+                  Complete =
+                      case ets:lookup(VV, From) of
+                          [] ->
+                              throw({missing_vertex, From});
+                          [#vertex{complete = C}] ->
+                              C
+                      end,
                   case ets:lookup(VV, To) of
                       [] ->
                           throw({missing_vertex, To});
@@ -123,14 +137,16 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
                                 [] -> map_sets:new();
                                 [{From, S}] -> S
                             end,
-                  case map_sets:is_element(To, OldDeps) of
+                  case map_sets:is_element(To, OldDeps) orelse Complete of
                       false ->
                           %% Increase rank of the parent task
                           ets:update_counter(VV, From, {#vertex.rank, 1}),
                           %% Increase the number of dependencies
                           ets:update_counter(VV, To, {#vertex.dependencies, 1});
                       true ->
-                          %% Avoid double-increasing counters
+                          %% Avoid double-increasing counters and
+                          %% ignore dependencies that are already
+                          %% complete
                           ok
                   end,
                   ets:insert(EE, {From, map_sets:add_element(To, OldDeps)}),
@@ -198,7 +214,7 @@ search_tasks(#task_graph{vertices = VV}, ExcludedModules, ExcludedTasks) ->
                          , execute = Mod
                          , data = Data
                          , rank = Rank
-                         } <- ets:match_object(VV, ?INDEPENDENT),
+                         } <- ets:match_object(VV, ?READY_TO_GO),
                   not map_sets:is_element(Ref, ExcludedTasks),
                   not map_sets:is_element(Mod, ExcludedModules)
               ],
@@ -224,20 +240,34 @@ print_graph(#task_graph{vertices = VV, edges = EE}) ->
     , "}\n"
     ].
 
-
 -spec complete_task(task_graph(), task_id()) -> {ok, task_graph()}.
-complete_task(G = #task_graph{vertices = V, edges = E}, Ref) ->
-    %% Remove the task itself
-    ets:delete(V, Ref),
+complete_task(G = #task_graph{vertices = VV, edges = EE}, Ref) ->
+    %% Mark task complete
+    [Old] = ets:lookup(VV, Ref),
+    ets:insert(VV, Old#vertex{complete = true}),
     %% Remove it from the dependencies
-    case ets:take(E, Ref) of
+    case ets:take(EE, Ref) of
         [] ->
             ok;
         [{Ref, Deps}] ->
-            [ets:update_counter(V, I, {#vertex.dependencies, -1})
+            [ets:update_counter(VV, I, {#vertex.dependencies, -1})
              || I <- map_sets:to_list(Deps)]
     end,
     {ok, G}.
+
+-spec task_to_vertex(#task{}) -> #vertex{}.
+task_to_vertex(#task{task_id = Ref, execute = E, data = D}) ->
+    #vertex{ task_id = Ref
+           , execute = E
+           , data = D
+           }.
+
+-spec vertex_to_task(#vertex{}) -> #task{}.
+vertex_to_task(#vertex{task_id = Ref, execute = E, data = D}) ->
+    #task{ task_id = Ref
+         , execute = E
+         , data = D
+         }.
 
 -ifdef(TEST).
 search_tasks_test() ->

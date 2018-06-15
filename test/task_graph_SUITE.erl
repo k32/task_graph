@@ -9,6 +9,7 @@
 -export([ t_topology_succ/1
         , t_topology/1
         , t_error_handling/1
+        , t_evt_draw_deps/1
         ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -17,7 +18,7 @@
 -include("task_graph_test.hrl").
 
 all() ->
-    [t_error_handling, t_topology, t_topology_succ].
+    [t_evt_draw_deps, t_error_handling, t_topology, t_topology_succ].
 
 -define(TIMEOUT, 60).
 -define(NUMTESTS, 1000).
@@ -121,6 +122,40 @@ t_topology(_Config) ->
 %% Check that errors in the tasks are reported
 t_error_handling(_Config) ->
     ?RUN_PROP(error_handling),
+    ok.
+
+t_evt_draw_deps(_Config) ->
+    Filename = "test.dot",
+    DynamicTask = #task{ task_id = dynamic
+                       , execute = fun(_,_) -> {ok, {}} end
+                       },
+    Exec = fun(1, _) ->
+                   {ok, {}, {[DynamicTask], [{1, dynamic}]}};
+              (_, _) ->
+                   {ok, {}}
+           end,
+    Opts = #{event_handlers =>
+                 [{task_graph_draw_deps, #{ filename => Filename
+                                          , color => fun(_Exec) -> green
+                                                     end
+                                          , shape => fun(_Exec) -> oval
+                                                     end
+                                          , preamble => "preamble"
+                                          }}]},
+    Tasks = [ #task{task_id="foo", execute=Exec}
+            , #task{task_id=1, execute=Exec}
+            ],
+    Deps = [{"foo", 1}],
+    {ok, _} = task_graph:run_graph(foo, Opts, {Tasks, Deps}),
+    Bin = <<"digraph task_graph {\n"
+            "preamble\n"
+            "  \"foo\"[color=green shape=oval];\n"
+            "  1[color=green shape=oval];\n"
+            "  \"foo\" -> 1;\n"
+            "  dynamic[color=green shape=oval];\n"
+            "  1 -> dynamic;\n"
+            "}\n">>,
+    {ok, Bin} = file:read_file(Filename),
     ok.
 
 make_DAG(L0) ->
