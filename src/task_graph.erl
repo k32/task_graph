@@ -101,7 +101,7 @@ run_graph(TaskName, Settings, Tasks) ->
 init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
     Graph = task_graph_lib:new_graph(TaskName),
     try
-        {ok, Graph1} = push_tasks(Tasks, Graph, EventMgr),
+        {ok, Graph1} = push_tasks(Tasks, Graph, EventMgr, undefined),
         JobLimit = maps:get(jobs, Settings, infinity),
         %% io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
         maybe_pop_tasks(),
@@ -128,20 +128,17 @@ handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
     #state{ graph = G0
           } = State,
     event({complete_task, Ref}, State),
+    {ok, G1} = task_graph_lib:complete_task(G0, Ref),
     State1 =
-        case {check_new_tasks(false, NewTasks, Ref), push_tasks(NewTasks, State)} of
-            {true, {ok, G1}} ->
-                {ok, G2} = task_graph_lib:complete_task(G1, Ref),
+        case push_tasks(NewTasks, State, undefined) of
+            {ok, G2} ->
                 State#state{ graph = G2
                            , current_tasks =
                                  maps:remove(Ref, State#state.current_tasks)
                            };
-            {true, Err= {error, _}} ->
+            Err ->
                 %% Dynamically added tasks are malformed or break topology
-                push_error(Ref, Err, State);
-            {false, _} ->
-                %% Dynamically added tasks break the topology
-                push_error(Ref, {topology_error, NewTasks}, State)
+                push_error(Ref, Err, State)
         end,
     maybe_pop_tasks(),
     {noreply, State1};
@@ -150,13 +147,13 @@ handle_cast({defer_task, Ref, NewTasks}, State) ->
           , current_tasks = Curr
           } = State,
     State1 =
-        case {check_new_tasks(true, NewTasks, Ref), push_tasks(NewTasks, State)} of
-            {true, {ok, G1}} ->
+        case push_tasks(NewTasks, State, {just, Ref}) of
+            {ok, G1} ->
                 State#state{ current_tasks = map_sets:del_element(Ref, Curr)
                            , graph = G1
                            };
-            _ ->
-                push_error(Ref, {topology_error, NewTasks}, State)
+            Err ->
+                push_error(Ref, Err, State)
         end,
     maybe_pop_tasks(),
     {noreply, State1};
@@ -219,32 +216,17 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--spec push_tasks(task_graph_lib:tasks(), #state{}) ->
-                        {ok, task_graph_lib:task_graph()}
-                      | {error, term()}.
-push_tasks(NewTasks, #state{graph = G0, event_mgr = EventMgr}) ->
-    push_tasks(NewTasks, G0, EventMgr).
-push_tasks(NewTasks = {Vertices, Edges}, G0, EventMgr) ->
+-spec push_tasks( task_graph_lib:tasks()
+                , #state{}
+                , task_graph_lib:maybe(task_graph_lib:task_id())
+                ) -> {ok, task_graph_lib:task_graph()}
+                   | {error, term()}.
+push_tasks(NewTasks, #state{graph = G0, event_mgr = EventMgr}, Parent) ->
+    push_tasks(NewTasks, G0, EventMgr, Parent).
+push_tasks(NewTasks = {Vertices, Edges}, G0, EventMgr, Parent) ->
     event({add_tasks, Vertices}, EventMgr),
     event({add_dependencies, Edges}, EventMgr),
-    task_graph_lib:expand(G0, NewTasks).
-
-%% Dynamically added tasks should not introduce new dependencies for
-%% any existing tasks
--spec check_new_tasks( boolean()
-                     , task_graph_lib:tasks()
-                     , task_graph_lib:task_id()
-                     ) -> boolean().
-check_new_tasks(Defer, {Vertices, Edges}, ParentTask) ->
-    L0 = [Ref || #task{task_id = Ref} <- Vertices],
-    New = case Defer of
-              true ->
-                  map_sets:from_list([ParentTask|L0]);
-              false ->
-                  map_sets:from_list(L0)
-          end,
-    Deps = map_sets:from_list([To || {_, To} <- Edges]),
-    map_sets:is_subset(Deps, New).
+    task_graph_lib:expand(G0, NewTasks, Parent).
 
 event(Term, #state{event_mgr = EventMgr}) ->
     gen_event:notify(EventMgr, Term);

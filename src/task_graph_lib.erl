@@ -14,13 +14,16 @@
              , task_id/0
              , task_execute/0
              , task_graph/0
+             , maybe/1
              ]).
 
 -export([ new_graph/1
-        , is_empty/1
+        , is_empty_graph/1
+        , is_complete/2
         , delete_graph/1
         , add_tasks/2
         , expand/2
+        , expand/3
         , complete_task/2
         , add_dependencies/2
         , search_tasks/3
@@ -32,6 +35,8 @@
 -type task_id() :: term().
 
 -type task() :: #task{}.
+
+-type maybe(A) :: {just, A} | undefined.
 
 -type tasks() :: {[task()], [{task_id(), task_id()}]}.
 
@@ -163,16 +168,56 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
     end.
 
 -spec expand(task_graph(), tasks()) -> {ok, task_graph()} | {error, term()}.
-expand(G, {Vertices, Edges}) ->
-    case add_tasks(G, Vertices) of
-        {ok, G1} ->
-            add_dependencies(G1, Edges);
-        Err ->
-            Err
+expand(G, Tasks) ->
+    expand(G, Tasks, undefined).
+
+-spec expand(task_graph(), tasks(), maybe(task_id())) -> {ok, task_graph()} | {error, term()}.
+expand(G, {Vertices, Edges} = Tasks, Parent) ->
+    case check_new_tasks(G, Tasks, Parent) of
+        true ->
+            case add_tasks(G, Vertices) of
+                {ok, G1} ->
+                    add_dependencies(G1, Edges);
+                Err ->
+                    Err
+            end;
+        false ->
+            {error, causality_error}
     end.
 
--spec is_empty(task_graph()) -> boolean().
-is_empty(G) ->
+%% Dynamically added tasks should not introduce new dependencies for
+%% any of existing pending tasks.
+%%
+%% Note: it's allowed to formally introduce depedencies on already
+%% _completed_ tasks, since it doesn't affect execution order. However
+%% task_graph doesn't guarantee that this condition is strictly
+%% enforced and checked.
+-spec check_new_tasks( task_graph()
+                     , tasks()
+                     , {just, task_id()} | undefined
+                     ) -> boolean().
+check_new_tasks(G, {Vertices, Edges}, ParentTask) ->
+    L0 = [Ref || #task{task_id = Ref} <- Vertices],
+    New = case ParentTask of
+              {just, PT} ->
+                  map_sets:from_list([PT|L0]);
+              undefined ->
+                  map_sets:from_list(L0)
+          end,
+    %% Tasks with new dependencies:
+    Deps = maps:from_list([{To, From} || {From, To} <- Edges]),
+    %% Disregard the new tasks:
+    Rest = map_sets:subtract(Deps, New),
+    %% Check rest of the tasks:
+    maps:fold( fun(_To, From, Acc) ->
+                       Acc andalso is_complete(G, From)
+               end
+             , true
+             , Rest
+             ).
+
+-spec is_empty_graph(task_graph()) -> boolean().
+is_empty_graph(G) ->
     case ets:first(G#task_graph.vertices) of
         '$end_of_table' ->
             true;
@@ -239,6 +284,15 @@ print_graph(#task_graph{vertices = VV, edges = EE}) ->
                , Edges)
     , "}\n"
     ].
+
+-spec is_complete(task_graph(), task_id()) -> boolean().
+is_complete(#task_graph{vertices=VV}, Ref) ->
+    case ets:lookup(VV, Ref) of
+        [#vertex{complete=Complete}] ->
+            Complete;
+        [] ->
+            false
+    end.
 
 -spec complete_task(task_graph(), task_id()) -> {ok, task_graph()}.
 complete_task(G = #task_graph{vertices = VV, edges = EE}, Ref) ->
