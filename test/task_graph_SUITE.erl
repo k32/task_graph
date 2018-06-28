@@ -24,8 +24,6 @@ all() ->
 -define(NUMTESTS, 1000).
 -define(SIZE, 1000).
 
--define(DAG, list({nat(), nat()})).
-
 -define(RUN_PROP(PROP),
         begin
             %% Workaround against CT's "wonderful" features:
@@ -41,10 +39,9 @@ all() ->
         end).
 
 error_handling() ->
-    ?FORALL({L, Errors}, {?DAG, list({nat(), integer(1, 2)})},
-            ?IMPLIES(length(L) > 0 andalso length(Errors) > 0,
+    ?FORALL({DAG0, Errors}, {dag(), list({nat(), integer(1, 2)})},
+            ?IMPLIES(length(element(1, DAG0)) > 0 andalso length(Errors) > 0,
             begin
-                DAG0 = make_DAG(L),
                 %% Inject errors:
                 DAG = change_random_tasks( Errors
                                          , fun(1) -> exception;
@@ -95,9 +92,8 @@ topology() ->
             end).
 
 topology_succ() ->
-    ?FORALL(L, ?DAG,
+    ?FORALL(DAG, dag(),
             begin
-                DAG = make_DAG(L),
                 {ok, _} = task_graph:run_graph(foo, DAG),
                 %% Check that all tasks have been executed:
                 AllRun = lists:foldl( fun(#task{task_id = Task}, Acc) ->
@@ -124,6 +120,8 @@ t_error_handling(_Config) ->
     ?RUN_PROP(error_handling),
     ok.
 
+%% Check that task spawn events are reported, collected and processed
+%% to nice graphs
 t_evt_draw_deps(_Config) ->
     Filename = "test.dot",
     DynamicTask = #task{ task_id = dynamic
@@ -158,20 +156,24 @@ t_evt_draw_deps(_Config) ->
     {ok, Bin} = file:read_file(Filename),
     ok.
 
-make_DAG(L0) ->
-    %% Shrink vertex space a little to get more interesting graphs:
-    L = [{N div 2, M div 4} || {N, M} <- L0],
-    Edges = [{N, N + M} || {N, M} <- L, M>0],
-    Singletons = [N || {N, 0} <- L],
-    Dependent = lists:flatten(lists:map(fun tuple_to_list/1, Edges)),
-    Vertices = [#task{ task_id = I
-                     , execute = test_worker
-                     , data = #{ deps => [From || {From, To} <- Edges, To =:= I]
-                               }
-                     }
-                || I <- lists:usort(Singletons ++ Dependent)],
-    %% io:format(user, "Vertices=~p~nEdges=~p~n", [Vertices, Edges]),
-    {Vertices, Edges}.
+dag() ->
+    dag(2, 4).
+dag(X, Y) ->
+    ?LET(L0, list({nat(), nat()}),
+        begin
+            %% Shrink vertex space to get more interesting graphs:
+            L = [{N div X, M div Y} || {N, M} <- L0],
+            Edges = [{N, N + M} || {N, M} <- L, M>0],
+            Singletons = [N || {N, 0} <- L],
+            Dependent = lists:flatten(lists:map(fun tuple_to_list/1, Edges)),
+            Vertices = [#task{ task_id = I
+                             , execute = test_worker
+                             , data = #{ deps => [From || {From, To} <- Edges, To =:= I]
+                                       }
+                             }
+                        || I <- lists:usort(Singletons ++ Dependent)],
+            {Vertices, Edges}
+        end).
 
 change_random_tasks(_, _, {[], _} = DAG) ->
     DAG;
