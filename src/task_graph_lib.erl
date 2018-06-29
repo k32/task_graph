@@ -24,10 +24,12 @@
         , add_tasks/2
         , expand/2
         , expand/3
-        , complete_task/2
+        , complete_task/3
         , add_dependencies/2
         , search_tasks/3
         , print_graph/1
+        , get_task_result/2
+        , gc/1
         ]).
 
 -type task_execute() :: atom() | task_runner:run().
@@ -49,6 +51,11 @@
         , complete = false :: boolean()
         }).
 
+-record(result,
+        { task_id :: task_id()
+        , result  :: term()
+        }).
+
 -define(READY_TO_GO,
         {vertex, _task_id = '$1'
                , _execute = '_'
@@ -59,8 +66,9 @@
                }).
 
 -record(task_graph,
-        { vertices :: ets:tid()
-        , edges    :: ets:tid()
+        { vertices :: ets:tid() %% #vertex{}
+        , edges    :: ets:tid() %% {From :: task_id(), To :: set(task_id())}
+        , results  :: ets:tid() %% #result{}
         }).
 
 %% -type edge() :: {task_id(), map_sets:set(task_id())}.
@@ -76,6 +84,10 @@ new_graph(_Name) ->
                , edges    = ets:new(tg_edges,
                                     [ set
                                     , {keypos, 1}
+                                    ])
+               , results  = ets:new(tg_results,
+                                    [ set
+                                    , {keypos, #result.task_id}
                                     ])
                }.
 
@@ -173,7 +185,7 @@ expand(G, Tasks) ->
 
 -spec expand(task_graph(), tasks(), maybe(task_id())) -> {ok, task_graph()} | {error, term()}.
 expand(G, {Vertices, Edges} = Tasks, Parent) ->
-    case check_new_tasks(G, Tasks, Parent) of
+    case check_new_tasks(Tasks, Parent) of
         true ->
             case add_tasks(G, Vertices) of
                 {ok, G1} ->
@@ -187,16 +199,10 @@ expand(G, {Vertices, Edges} = Tasks, Parent) ->
 
 %% Dynamically added tasks should not introduce new dependencies for
 %% any of existing pending tasks.
-%%
-%% Note: it's allowed to formally introduce depedencies on already
-%% _completed_ tasks, since it doesn't affect execution order. However
-%% task_graph doesn't guarantee that this condition is strictly
-%% enforced and checked.
--spec check_new_tasks( task_graph()
-                     , tasks()
+-spec check_new_tasks( tasks()
                      , {just, task_id()} | undefined
                      ) -> boolean().
-check_new_tasks(G, {Vertices, Edges}, ParentTask) ->
+check_new_tasks({Vertices, Edges}, ParentTask) ->
     L0 = [Ref || #task{task_id = Ref} <- Vertices],
     New = case ParentTask of
               {just, PT} ->
@@ -207,14 +213,7 @@ check_new_tasks(G, {Vertices, Edges}, ParentTask) ->
     %% Tasks with new dependencies:
     Deps = maps:from_list([{To, From} || {From, To} <- Edges]),
     %% Disregard the new tasks:
-    Rest = map_sets:subtract(Deps, New),
-    %% Check rest of the tasks:
-    maps:fold( fun(_To, From, Acc) ->
-                       Acc andalso is_complete(G, From)
-               end
-             , true
-             , Rest
-             ).
+    map_sets:size(map_sets:subtract(Deps, New)) == 0.
 
 -spec is_empty_graph(task_graph()) -> boolean().
 is_empty_graph(G) ->
@@ -294,11 +293,19 @@ is_complete(#task_graph{vertices=VV}, Ref) ->
             false
     end.
 
--spec complete_task(task_graph(), task_id()) -> {ok, task_graph()}.
-complete_task(G = #task_graph{vertices = VV, edges = EE}, Ref) ->
+-spec complete_task(task_graph(), task_id(), term()) -> {ok, task_graph()}.
+complete_task(G = #task_graph{vertices = VV, edges = EE, results = RR}, Ref, Result) ->
     %% Mark task complete
     [Old] = ets:lookup(VV, Ref),
     ets:insert(VV, Old#vertex{complete = true}),
+    case Result of
+        undefined ->
+            ok;
+        _ ->
+            ets:insert(RR, #result{ task_id = Ref
+                                  , result = Result
+                                  })
+    end,
     %% Remove it from the dependencies
     case ets:take(EE, Ref) of
         [] ->
@@ -322,6 +329,29 @@ vertex_to_task(#vertex{task_id = Ref, execute = E, data = D}) ->
          , execute = E
          , data = D
          }.
+
+%% Safe to use only for 1st-rank dependencies, the rest of the values
+%% may be GC'd
+-spec get_task_result(task_graph(), task_id()) -> {ok, term()} | error.
+get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
+    case ets:lookup(VV, Ref) of
+        [_] ->
+            {ok, case ets:match(RR, #result{task_id = Ref, result = '$1'}) of
+                     [[Val]] ->
+                         Val;
+                     [] ->
+                         undefined
+                 end};
+        [] ->
+            error
+    end.
+
+%% This API is ugly since it leaks implementation details, namely
+%% mutable ETS nature of the task graph. But we may want to run it
+%% in parallel, so it should not pretend to be pure
+-spec gc(task_graph()) -> ok.
+gc(G) ->
+    error(not_implemented).
 
 -ifdef(TEST).
 search_tasks_test() ->
@@ -351,11 +381,11 @@ search_tasks_test() ->
     ?assertEqual( {ok, []}
                 , search_tasks(G2, #{}, map_sets:from_list([0]))
                 ),
-    {ok, G3} = complete_task(G2, 0),
+    {ok, G3} = complete_task(G2, 0, undefined),
     ?assertEqual( {ok, [#task{task_id=1}]}
                 , search_tasks(G3, #{}, #{})
                 ),
-    {ok, G4} = complete_task(G3, 1),
+    {ok, G4} = complete_task(G3, 1, undefined),
     ?assertEqual( {ok, [#task{task_id=2}]}
                 , search_tasks(G4, #{}, #{})
                 ).

@@ -6,7 +6,11 @@
 -callback stop(State :: term()) ->
     ok.
 
--callback run_task(State, task_graph_lib:task_id(), Data :: term()) ->
+-callback run_task( State :: term()
+                  , task_graph_lib:task_id()
+                  , Data :: term()
+                  , GetDepResult :: fun((task_graph_lib:task_id()) -> {ok, term()} | error)
+                  ) ->
           {ok, Result}
         | {ok, Result, task_graph_lib:tasks()}
         | {defer, State, task_graph_lib:tasks()}

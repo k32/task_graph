@@ -128,23 +128,22 @@ handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
     #state{ graph = G0
           } = State,
     event({complete_task, Ref}, State),
-    {ok, G1} = task_graph_lib:complete_task(G0, Ref),
+    {ok, G1} = task_graph_lib:complete_task(G0, Ref, Return),
     State1 =
-        case push_tasks(NewTasks, State, undefined) of
+        case push_tasks(NewTasks, State#state{graph = G1}, undefined) of
             {ok, G2} ->
                 State#state{ graph = G2
                            , current_tasks =
                                  maps:remove(Ref, State#state.current_tasks)
                            };
             Err ->
-                %% Dynamically added tasks are malformed or break topology
+                %% Dynamically added tasks are malformed or break the topology
                 push_error(Ref, Err, State)
         end,
     maybe_pop_tasks(),
     {noreply, State1};
 handle_cast({defer_task, Ref, NewTasks}, State) ->
-    #state{ graph = G0
-          , current_tasks = Curr
+    #state{ current_tasks = Curr
           } = State,
     State1 =
         case push_tasks(NewTasks, State, {just, Ref}) of
@@ -281,22 +280,30 @@ defer_task(Parent, Ref, NewTasks) ->
     gen_server:cast(Parent, {defer_task, Ref, NewTasks}).
 
 -spec run_task(task_graph_lib:task(), #state{}) -> #state{}.
-run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT}) ->
-    Pid = spawn_worker(Task, todo_undefined, State#state.event_mgr),
+run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT, graph = G}) ->
+    GetDepResult = fun(Ref) ->
+                           task_graph_lib:get_task_result(G, Ref)
+                   end,
+    Pid = spawn_worker(Task, todo_undefined, State#state.event_mgr, GetDepResult),
     State#state{current_tasks = TT#{Ref => Pid}}.
 
--spec spawn_worker(task_graph_lib:task(), term(), event_mgr()) -> pid().
-spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, EventMgr) ->
+-spec spawn_worker( task_graph_lib:task()
+                  , term()
+                  , event_mgr()
+                  , fun((task_graph_lib:task_id()) -> {ok, term()} | error)
+                  ) -> pid().
+spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, EventMgr, GetDepResult) ->
     Parent = self(),
     spawn_link(
       fun() ->
           event({spawn_task, Ref, self()}, EventMgr),
           try
+
               Return =
                   if is_atom(Exec) ->
-                          Exec:run_task(WorkerState, Ref, Data);
+                          Exec:run_task(WorkerState, Ref, Data, GetDepResult);
                      is_function(Exec) ->
-                          Exec(Ref, Data)
+                          Exec(Ref, Data, GetDepResult)
                   end,
               case Return of
                   {ok, Result} ->
