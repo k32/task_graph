@@ -46,7 +46,6 @@ handle_event({add_tasks, Tasks}, #state{fd=FD} = State) ->
      || #task{task_id = Ref, execute = Exec} <- Tasks],
     {ok, State};
 handle_event({add_dependencies, Deps}, #state{fd=FD} = State) ->
-    #state{shape_fun = Shape, color_fun = Color} = State,
     [io:format(FD, "  ~p -> ~p;~n"
               , [From, To]
               )

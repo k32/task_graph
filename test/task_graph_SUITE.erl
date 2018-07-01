@@ -29,6 +29,7 @@ all() ->
             %% Workaround against CT's "wonderful" features:
             OldGL = group_leader(),
             group_leader(whereis(user), self()),
+            io:format(??PROP),
             Result = proper:quickcheck( PROP()
                                       , [ {numtests, ?NUMTESTS}
                                         , {max_size, ?SIZE}
@@ -39,19 +40,10 @@ all() ->
         end).
 
 error_handling() ->
-    ?FORALL({DAG0, Errors}, {dag(), list({nat(), integer(1, 2)})},
-            ?IMPLIES(length(element(1, DAG0)) > 0 andalso length(Errors) > 0,
+    ?FORALL(DAG, dag(inject_errors()),
+            ?IMPLIES(expected_errors(DAG) /= [],
             begin
-                %% Inject errors:
-                DAG = change_random_tasks( Errors
-                                         , fun(1) -> exception;
-                                              (2) -> error
-                                           end
-                                         , DAG0
-                                         ),
-                ExpectedErrors =
-                    [I || #task{task_id = I, data = D} <- element(1, DAG),
-                          D =:= error orelse D =:= exception],
+                ExpectedErrors = expected_errors(DAG),
                 {error, Result} = task_graph:run_graph(foo, DAG),
                 map_sets:is_subset( Result
                                   , map_sets:from_list(ExpectedErrors)
@@ -125,11 +117,11 @@ t_error_handling(_Config) ->
 t_evt_draw_deps(_Config) ->
     Filename = "test.dot",
     DynamicTask = #task{ task_id = dynamic
-                       , execute = fun(_,_) -> {ok, {}} end
+                       , execute = fun(_,_,_) -> {ok, {}} end
                        },
-    Exec = fun(1, _) ->
+    Exec = fun(1, _, _) ->
                    {ok, {}, {[DynamicTask], [{1, dynamic}]}};
-              (_, _) ->
+              (_, _, _) ->
                    {ok, {}}
            end,
     Opts = #{event_handlers =>
@@ -156,38 +148,55 @@ t_evt_draw_deps(_Config) ->
     {ok, Bin} = file:read_file(Filename),
     ok.
 
+%% Proper generator for directed acyclic graphs:
 dag() ->
-    dag(2, 4).
-dag(X, Y) ->
-    ?LET(L0, list({nat(), nat()}),
-        begin
-            %% Shrink vertex space to get more interesting graphs:
-            L = [{N div X, M div Y} || {N, M} <- L0],
-            Edges = [{N, N + M} || {N, M} <- L, M>0],
-            Singletons = [N || {N, 0} <- L],
-            Dependent = lists:flatten(lists:map(fun tuple_to_list/1, Edges)),
-            Vertices = [#task{ task_id = I
-                             , execute = test_worker
-                             , data = #{ deps => [From || {From, To} <- Edges, To =:= I]
-                                       }
-                             }
-                        || I <- lists:usort(Singletons ++ Dependent)],
-            {Vertices, Edges}
-        end).
+    dag(static_deps_check()).
+%% ...supply custom data to tasks:
+dag(Fun) ->
+    dag(Fun, 2, 4).
+%% ...adjust magic parameters X and Y governing graph topology:
+dag(Fun, X, Y) ->
+    ?LET(Mishmash, list({{nat(), nat()}, {Fun, Fun}}),
+          begin
+              {L0, Data0} = lists:unzip(Mishmash), %% Separate vertex IDs and data
+              %% Shrink vertex space to get more interesting graphs:
+              L = [{N div X, M div Y} || {N, M} <- L0],
+              Edges = [{N, N + M} || {N, M} <- L, M>0],
+              Singletons = [N || {N, 0} <- L],
+              Vertices = lists:usort( lists:append([tuple_to_list(I) || I <- Edges]) ++
+                                      Singletons
+                                    ),
+              Data = lists:sublist( lists:append([tuple_to_list(I) || I <- Data0])
+                                  , length(Vertices)
+                                  ),
+              Tasks = [#task{ task_id = I
+                            , execute = test_worker
+                            , data = Fun(I, [From || {From, To} <- Edges, To =:= I])
+                            }
+                       || {I, Fun} <- lists:zip(Vertices, Data)],
+              {Tasks, Edges}
+          end).
 
-change_random_tasks(_, _, {[], _} = DAG) ->
-    DAG;
-change_random_tasks(Positions0, Fun, {VV0, EE}) ->
-    Len = length(VV0),
-    Positions = [{Pos rem Len, Data} || {Pos, Data} <- Positions0],
-    VV = lists:foldl( fun({Pos, Data}, Acc) ->
-                              {A, [B|C]} = lists:split(Pos, Acc),
-                              A ++ [B#task{data=Fun(Data)}|C]
-                      end
-                    , VV0
-                    , Positions
-                    ),
-    {VV, EE}.
+static_deps_check() ->
+    fun(_Self, Deps) ->
+            #{deps => Deps}
+    end.
+
+skip_deps_check() ->
+    fun(_Self, _Deps) ->
+            #{deps => []}
+    end.
+
+inject_errors() ->
+    frequency([ {1, fun(_, _) -> error end}
+              , {1, fun(_, _) -> exception end}
+              , {5, skip_deps_check()}
+              ]).
+
+expected_errors(DAG) ->
+    {Vertices, _} = DAG,
+    [Id || #task{task_id = Id, data = D} <- Vertices,
+           D =:= error orelse D =:= exception].
 
 suite() ->
     [{timetrap,{seconds, ?TIMEOUT}}].
