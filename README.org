@@ -3,5 +3,73 @@
 [[https://travis-ci.org/k32/task_graph.svg?branch%3Dmaster]]
 
 * TODO Description
+Yet another library reinventing good old /make/, implemented in pure
+Erlang. This library aims to do one thing right: it runs tasks in
+parallel in topological order. Hence it doesn't do globing,
+templating, it doesn't provide any DSLs, etc...
 
-* TODO Examples
+* Features
+** Dynamic tasks
+
+Tasks may spawn other tasks or discover their own dependencies
+dynamically
+
+** Painstakingly tested
+Random task graph topologies are tested using [[http://proper.softlab.ntua.gr/][proper]].
+
+** Written with build flow optimization in mind
+
+Sooner or later everyone wants to optimize their builds. =task_graph= comes with a few helpful tools:
+
+*** Dependency graph visualization
+
+* Anti-features
+
+=task_graph= doesn't know anything about nature of the tasks, so it
+can't automatically detect which tasks should be rebuilt. If you want
+this functionality, you can implement it by returning "changed"
+flag. In the future a helper may be added to mitigate this limitation.
+
+* Examples
+
+Basic usage:
+
+#+BEGIN_SRC erlang
+-include_lib("task_graph/include/task_graph.hrl").
+
+main() ->
+    %% Define tasks:
+    Tasks = [#task{ task_id = I
+                  , execute = fun(MyId, MyData) ->
+                                  io:format("I'm ~p, doing ~p~n", [MyId, MyData])
+                              end,
+                  , data = something
+                  }
+             || I <- lists:seq(1, 4)],
+    %% Define dependnecies ({A, B} reads as "B depends on A"):
+    Edges = [{1, 2}, {1, 3}, {2, 3}, {2, 4}],
+    %% Execute graph:
+    {ok, _} = task_graph:run_graph(my_graph, {Tasks, Edges}).
+#+END_SRC
+
+Got lost in the dependencies? It's possible to visualize the graph:
+
+#+BEGIN_SRC erlang
+    Opts = #{event_handlers =>
+                 [{task_graph_draw_deps, #{ filename => "dependencies.dot"
+                                          %% You can optionally customize shape and color of vertices:
+                                          , color => fun(#task{}) ->
+                                                         green
+                                                     end
+                                          , shape => fun(#task{}) ->
+                                                         oval
+                                                     end
+                                          }}]},
+    {ok, _} = task_graph:run_graph(my_graph, Opts, {Tasks, Edges}).
+#+END_SRC
+
+Render the resulting file using graphviz:
+
+#+BEGIN_SRC bash
+dot -Tpng -O dependencies.dot
+#+END_SRC
