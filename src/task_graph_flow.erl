@@ -15,6 +15,12 @@
         , start_ts :: integer()
         }).
 
+-ifndef(OLD_TIME_UNITS).
+-define(timeUnit, millisecond).
+-else.
+-define(timeUnit, milli_seconds).
+-endif.
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -43,7 +49,7 @@ handle_event(_, State) ->
 log(Event, Ref, #state{fd=FD, start_ts=T}) ->
     Dt = erlang:convert_time_unit( erlang:monotonic_time() - T
                                  , native
-                                 , millisecond
+                                 , ?timeUnit
                                  ),
     io:format(FD, "~10B: ~p ~p~n", [Dt, Event, Ref]).
 
