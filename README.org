@@ -57,12 +57,9 @@ Got lost in the dependencies? It's possible to visualize the graph:
 #+BEGIN_SRC erlang
     Opts = #{event_handlers =>
                  [{task_graph_draw_deps, #{ filename => "dependencies.dot"
-                                          %% You can optionally customize shape and color of vertices:
-                                          , color => fun(#task{}) ->
-                                                         green
-                                                     end
-                                          , shape => fun(#task{}) ->
-                                                         oval
+                                          %% You can optionally customize vertices styles:
+                                          , style => fun(#task{}) ->
+                                                         "color=green shape=oval"
                                                      end
                                           }}]},
     {ok, _} = task_graph:run_graph(my_graph, Opts, {Tasks, Edges}).

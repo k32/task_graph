@@ -11,10 +11,9 @@
          handle_info/2, terminate/2, code_change/3]).
 
 -record(state,
-        { fd       :: file:io_device()
-        , preamble :: string()
-        , color_fun :: fun()
-        , shape_fun :: fun()
+        { fd        :: file:io_device()
+        , preamble  :: string()
+        , style_fun :: fun()
         }).
 
 %%%===================================================================
@@ -28,22 +27,21 @@
 init(Args) ->
     Filename = maps:get(filename, Args, "task_graph.dot"),
     Preamble = maps:get(preamble, Args, ""),
-    Color    = maps:get(color, Args, fun(_) -> black end),
-    Shape    = maps:get(shape, Args, fun(_) -> oval end),
+    StyleFun = maps:get(style, Args, fun(_) -> "" end),
     {ok, FD} = file:open(Filename, [write]),
     io:format(FD, "digraph task_graph {~n~s~n", [Preamble]),
     {ok, #state{ fd = FD
-               , color_fun = Color
-               , shape_fun = Shape
+               , style_fun = StyleFun
                , preamble  = Preamble
                }}.
 
 handle_event({add_tasks, Tasks}, #state{fd=FD} = State) ->
-    #state{shape_fun = Shape, color_fun = Color} = State,
-    [io:format(FD, "  ~p[color=~p shape=~p];~n"
-              , [Ref, Color(Exec), Shape(Exec)]
+    #state{style_fun = StyleFun} = State,
+    [io:format( FD
+              , "  ~p[~s];~n"
+              , [Ref, StyleFun(Task)]
               )
-     || #task{task_id = Ref, execute = Exec} <- Tasks],
+     || Task = #task{task_id = Ref, execute = Exec} <- Tasks],
     {ok, State};
 handle_event({add_dependencies, Deps}, #state{fd=FD} = State) ->
     [io:format(FD, "  ~p -> ~p;~n"

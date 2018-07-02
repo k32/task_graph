@@ -131,10 +131,7 @@ t_evt_draw_deps(_Config) ->
            end,
     Opts = #{event_handlers =>
                  [{task_graph_draw_deps, #{ filename => Filename
-                                          , color => fun(_Exec) -> green
-                                                     end
-                                          , shape => fun(_Exec) -> oval
-                                                     end
+                                          , style    => fun(_) -> "color=green shape=oval" end
                                           , preamble => "preamble"
                                           }}]},
     Tasks = [ #task{task_id="foo", execute=Exec}

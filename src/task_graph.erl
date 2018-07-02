@@ -306,12 +306,23 @@ spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, Eve
                           Exec(Ref, Data, GetDepResult)
                   end,
               case Return of
+                  ok ->
+                      complete_task(Parent, Ref, true, undefined);
                   {ok, Result} ->
                       complete_task(Parent, Ref, true, Result);
                   {ok, Result, NewTasks} ->
                       complete_task(Parent, Ref, true, Result, NewTasks);
+
+                  unchanged ->
+                      complete_task(Parent, Ref, true, undefined);
+                  {unchanged, Result} ->
+                      complete_task(Parent, Ref, true, Result);
+                  {unchanged, Result, NewTasks} ->
+                      complete_task(Parent, Ref, true, Result, NewTasks);
+
                   {defer, NewTasks} ->
                       defer_task(Parent, Ref, NewTasks);
+
                   {error, Reason} ->
                       complete_task(Parent, Ref, false, Reason)
               end
