@@ -6,10 +6,11 @@
         ]).
 
 %% Testcases:
--export([ t_topology_succ/1
+-export([ t_evt_draw_deps/1
+        , t_evt_build_flow/1
+        , t_topology_succ/1
         , t_topology/1
         , t_error_handling/1
-        , t_evt_draw_deps/1
         ]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -18,7 +19,7 @@
 -include("task_graph_test.hrl").
 
 all() ->
-    [t_evt_draw_deps, t_error_handling, t_topology, t_topology_succ].
+    [t_evt_draw_deps, t_evt_build_flow, t_error_handling, t_topology, t_topology_succ].
 
 -define(TIMEOUT, 60).
 -define(NUMTESTS, 1000).
@@ -43,6 +44,7 @@ error_handling() ->
     ?FORALL(DAG, dag(inject_errors()),
             ?IMPLIES(expected_errors(DAG) /= [],
             begin
+                reset_table(),
                 ExpectedErrors = expected_errors(DAG),
                 {error, Result} = task_graph:run_graph(foo, DAG),
                 map_sets:is_subset( Result
@@ -53,6 +55,7 @@ error_handling() ->
 topology() ->
     ?FORALL(L0, list({nat(), nat()}),
             begin
+                reset_table(),
                 %% Shrink vertex space a little to get more interesting graphs:
                 L1 = [{N div 2, M div 2} || {N, M} <- L0],
                 Edges = lists:filter(fun({A, B}) -> A /= B end, L1),
@@ -86,6 +89,8 @@ topology() ->
 topology_succ() ->
     ?FORALL(DAG, dag(),
             begin
+                reset_table(),
+                Filename = integer_to_list(erlang:monotonic_time()) ++ ".log",
                 {ok, _} = task_graph:run_graph(foo, DAG),
                 %% Check that all tasks have been executed:
                 AllRun = lists:foldl( fun(#task{task_id = Task}, Acc) ->
@@ -148,6 +153,34 @@ t_evt_draw_deps(_Config) ->
     {ok, Bin} = file:read_file(Filename),
     ok.
 
+%% Check that build log is written
+t_evt_build_flow(_Config) ->
+    Filename = "build_flow.log",
+    Opts = #{event_handlers =>
+                 [{task_graph_flow, #{ filename => Filename
+                                     }}]},
+    Tasks = [#task{ task_id = I
+                  , execute = fun(_,_,_) -> {ok, {}} end
+                  , data = #{}
+                  }
+             || I <- lists:seq(1, 3)],
+    Deps = [{1, 2}, {2, 3}, {1, 3}],
+    {ok, _} = task_graph:run_graph(foo, Opts, {Tasks, Deps}),
+    Bin = <<"TS spawn 1\n"
+            "TS complete_task 1\n"
+            "TS spawn 2\n"
+            "TS complete_task 2\n"
+            "TS spawn 3\n"
+            "TS complete_task 3\n"
+          >>,
+    {ok, Bin0} = file:read_file(Filename),
+    Bin = re:replace( Bin0
+                    , <<"^[ 0-9]+:">>
+                    , <<"TS">>
+                    , [multiline, global, {return, binary}]
+                    ),
+    ok.
+
 %% Proper generator for directed acyclic graphs:
 dag() ->
     dag(static_deps_check()).
@@ -201,6 +234,9 @@ expected_errors(DAG) ->
 suite() ->
     [{timetrap,{seconds, ?TIMEOUT}}].
 
+reset_table() ->
+    ets:delete_all_objects(?TEST_TABLE).
+
 init_per_testcase(_, Config) ->
     ets:new(?TEST_TABLE, [ set
                          , public
@@ -211,6 +247,6 @@ init_per_testcase(_, Config) ->
 
 end_per_testcase(_, Config) ->
     ets:delete(?TEST_TABLE),
-    ok.
+    Config.
 
 %% Quick view: cat > graph.dot ; dot -Tpng -O graph.dot; xdg-open graph.dot.png

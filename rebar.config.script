@@ -1,0 +1,15 @@
+%% -*- mode:erlang -*-
+{_, ErlOpts} = lists:keyfind(erl_opts, 1, CONFIG).
+Rel = try erlang:system_info(otp_release) of
+    Vsn ->
+        {match,[Maj]} = re:run(Vsn, "^R?([0-9]+)", [{capture,[1],list}]),
+        list_to_integer(Maj)
+    catch _:_ ->
+        "OLD"
+end,
+Macros = if Rel < 19 ->
+                 [{d, 'OLD_TIME_UNITS'}];
+            true ->
+                 []
+         end,
+lists:keystore(erl_opts, 1, CONFIG, {erl_opts, Macros ++ ErlOpts}).

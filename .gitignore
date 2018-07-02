@@ -18,3 +18,6 @@ _build
 rebar3.crashdump
 *#
 *~
+concuerror_report.txt
+README.html
+Concuerror
