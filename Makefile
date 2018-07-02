@@ -1,15 +1,18 @@
 .PHONY: all build concuerror
 
-CONCUERROR_BIN:=Concuerror/_build/default/bin/concuerror
+ROOT=$(shell pwd)
+CONCUERROR_BIN=$(ROOT)/Concuerror/_build/default/bin/concuerror
 
-all: build # concuerror_tests
+all: build
 
 build:
 	rebar3 do compile,dialyzer,eunit,ct
 
-# Concuerror doesn't support ets:take :(
+# TODO: This is exteremely messy, mostly for internal use
 concuerror_tests: $(CONCUERROR_BIN)
-	ERL_LIBS=./_build/test/lib $(CONCUERROR_BIN) --file test/concuerror_tests.erl -t gc_test
+	rebar3 as concuerror eunit && \
+	ERL_LIBS=$(ROOT)/_build/concuerror/lib \
+	$(CONCUERROR_BIN) -a 1000 -pz ./_build/concuerror+test/lib/task_graph/test/ --file test/concuerror_tests.erl -t gc_test
 
 $(CONCUERROR_BIN):
 	git clone https://github.com/parapluu/Concuerror.git && \

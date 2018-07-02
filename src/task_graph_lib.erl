@@ -42,6 +42,17 @@
 
 -type tasks() :: {[task()], [{task_id(), task_id()}]}.
 
+%% TODO: Fix concuerror and remove this ugly crap
+-ifndef(CONCUERROR).
+-define(ets_take(Tab, Elem), ets:take(Tab, Elem)).
+-else.
+-define(ets_take(Tab, Elem), begin
+                         Ret = ets:lookup(Tab, Elem),
+                         ets:delete(Tab, Elem),
+                         Ret
+                     end).
+-endif.
+
 -record(vertex,
         { task_id :: task_id()
         , execute :: task_execute()
@@ -150,7 +161,7 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
                       _ ->
                           ok
                   end,
-                  OldDeps = case ets:take(EE, From) of
+                  OldDeps = case ?ets_take(EE, From) of
                                 [] -> map_sets:new();
                                 [{From, S}] -> S
                             end,
@@ -307,7 +318,7 @@ complete_task(G = #task_graph{vertices = VV, edges = EE, results = RR}, Ref, Res
                                   })
     end,
     %% Remove it from the dependencies
-    case ets:take(EE, Ref) of
+    case ?ets_take(EE, Ref) of
         [] ->
             ok;
         [{Ref, Deps}] ->
