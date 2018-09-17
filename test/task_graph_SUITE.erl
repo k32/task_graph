@@ -19,7 +19,9 @@
 -include("task_graph_test.hrl").
 
 all() ->
-    [t_evt_draw_deps, t_evt_build_flow, t_error_handling, t_topology, t_topology_succ].
+    [ t_evt_draw_deps, t_evt_build_flow, t_error_handling, t_topology
+    , t_topology_succ
+    ].
 
 -define(TIMEOUT, 60).
 -define(NUMTESTS, 1000).
@@ -202,6 +204,7 @@ dag(Fun, X, Y) ->
               Tasks = [#task{ task_id = I
                             , execute = test_worker
                             , data = Fun(I, [From || {From, To} <- Edges, To =:= I])
+                            , resources = [task]
                             }
                        || {I, Fun} <- lists:zip(Vertices, Data)],
               {Tasks, Edges}

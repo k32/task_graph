@@ -3,7 +3,7 @@
   {git,"https://github.com/k32/map_sets.git",
        {ref,"1ea73fe16bd4c58efc3438723a887832b2a65a3c"}},
   0},
- {<<"proper">>,{pkg,<<"proper">>,<<"1.2.0">>},0}]}.
+ {<<"proper">>,{pkg,<<"proper">>,<<"1.2.0">>},1}]}.
 [
 {pkg_hash,[
  {<<"proper">>, <<"1466492385959412A02871505434E72E92765958C60DBA144B43863554B505A4">>}]}

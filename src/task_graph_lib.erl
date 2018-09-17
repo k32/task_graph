@@ -12,12 +12,14 @@
 -export_type([ task/0
              , tasks/0
              , task_id/0
+             , resource_id/0
              , task_execute/0
              , task_graph/0
              , maybe/1
              ]).
 
 -export([ new_graph/1
+        , new_graph/2
         , is_empty_graph/1
         , is_complete/2
         , delete_graph/1
@@ -26,10 +28,9 @@
         , expand/3
         , complete_task/3
         , add_dependencies/2
-        , search_tasks/3
+        , search_tasks/2
         , print_graph/1
         , get_task_result/2
-        , gc/1
         ]).
 
 -type task_execute() :: atom() | task_runner:run().
@@ -37,6 +38,8 @@
 -type task_id() :: term().
 
 -type task() :: #task{}.
+
+-type resource_id() :: term().
 
 -type maybe(A) :: {just, A} | undefined.
 
@@ -49,11 +52,17 @@
         , rank = 0 :: non_neg_integer()         %% How many tasks depend on this one
         , dependencies = 0 :: non_neg_integer() %% How many dependencies this task has
         , complete = false :: boolean()
+        , resources :: [resource_id()]
         }).
 
 -record(result,
         { task_id :: task_id()
         , result  :: term()
+        }).
+
+-record(resource,
+        { resource_id :: resource_id()
+        , quantity    :: non_neg_integer()
         }).
 
 -define(READY_TO_GO,
@@ -63,38 +72,60 @@
                , _rank = '_'
                , _dependencies = 0
                , _complete = false
+               , _resources = '_'
                }).
 
 -record(task_graph,
-        { vertices :: ets:tid() %% #vertex{}
-        , edges    :: ets:tid() %% {From :: task_id(), To :: set(task_id())}
-        , results  :: ets:tid() %% #result{}
+        { vertices   :: ets:tid() %% #vertex{}
+        , edges      :: ets:tid() %% {From :: task_id(), To :: set(task_id())}
+        , results    :: ets:tid() %% #result{}
+        , resources  :: ets:tid() %% #resource{}
         }).
 
 %% -type edge() :: {task_id(), map_sets:set(task_id())}.
 
 -opaque task_graph() :: #task_graph{}.
 
+
 -spec new_graph(atom()) -> task_graph().
-new_graph(_Name) ->
-    #task_graph{ vertices = ets:new(tg_vertices,
-                                    [ set
-                                    , {keypos, #vertex.task_id}
-                                    ])
-               , edges    = ets:new(tg_edges,
-                                    [ set
-                                    , {keypos, 1}
-                                    ])
-               , results  = ets:new(tg_results,
-                                    [ set
-                                    , {keypos, #result.task_id}
-                                    ])
+new_graph(Name) ->
+    new_graph(Name, #{}).
+
+-spec new_graph( atom()
+               , #{resource_id() => non_neg_integer()}
+               ) -> task_graph().
+new_graph(_Name, Resources) ->
+    RR = ets:new(tg_resources,
+                 [ set
+                 , {keypos, #resource.resource_id}
+                 ]),
+    maps:map( fun(K, V) when is_integer(V), V > 0 ->
+                      ets:insert(RR, #resource{ resource_id = K
+                                              , quantity    = V
+                                              })
+              end
+            , Resources
+            ),
+    #task_graph{ vertices  = ets:new(tg_vertices,
+                                     [ set
+                                     , {keypos, #vertex.task_id}
+                                     ])
+               , edges     = ets:new(tg_edges,
+                                     [ set
+                                     , {keypos, 1}
+                                     ])
+               , results   = ets:new(tg_results,
+                                     [ set
+                                     , {keypos, #result.task_id}
+                                     ])
+               , resources = RR
                }.
 
 -spec delete_graph(task_graph()) -> ok.
-delete_graph(#task_graph{vertices = V, edges = E}) ->
+delete_graph(#task_graph{vertices = V, edges = E, resources = R}) ->
     ets:delete(V),
     ets:delete(E),
+    ets:delete(R),
     ok.
 
 -spec add_tasks(task_graph(), [task()]) ->
@@ -244,10 +275,10 @@ check_cycles(Edges, Visited, Vertex) ->
     end.
 
 -spec search_tasks( task_graph()
-                  , map_sets:set(task_execute())
                   , map_sets:set(task_id())
                   ) -> {ok, [task()]}.
-search_tasks(#task_graph{vertices = VV}, ExcludedModules, ExcludedTasks) ->
+search_tasks(Graph, ExcludedTasks) ->
+    #task_graph{vertices = VV, resources = RR} = Graph,
     Matches = [{ -Rank
                , #task{ task_id = Ref
                       , execute = Mod
@@ -258,9 +289,10 @@ search_tasks(#task_graph{vertices = VV}, ExcludedModules, ExcludedTasks) ->
                          , execute = Mod
                          , data = Data
                          , rank = Rank
+                         , resources = Resources
                          } <- ets:match_object(VV, ?READY_TO_GO),
                   not map_sets:is_element(Ref, ExcludedTasks),
-                  not map_sets:is_element(Mod, ExcludedModules)
+                  resources_available(RR, Resources)
               ],
     {ok, [T || {_, T} <- lists:keysort(1, Matches)]}.
 
@@ -317,10 +349,11 @@ complete_task(G = #task_graph{vertices = VV, edges = EE, results = RR}, Ref, Res
     {ok, G}.
 
 -spec task_to_vertex(#task{}) -> #vertex{}.
-task_to_vertex(#task{task_id = Ref, execute = E, data = D}) ->
+task_to_vertex(#task{task_id = Ref, execute = E, data = D, resources = R}) ->
     #vertex{ task_id = Ref
            , execute = E
            , data = D
+           , resources = R
            }.
 
 -spec vertex_to_task(#vertex{}) -> #task{}.
@@ -346,12 +379,19 @@ get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
             error
     end.
 
-%% This API is ugly since it leaks implementation details, namely
-%% mutable ETS nature of the task graph. But we may want to run it
-%% in parallel, so it should not pretend to be pure
--spec gc(task_graph()) -> ok.
-gc(G) ->
-    error(not_implemented).
+-spec resources_available( ets:tid()
+                         , [resource_id()]
+                         ) -> boolean().
+resources_available(RR, Resources) ->
+    lists:all( fun(I) ->
+                       case ets:lookup(RR, I) of
+                           [] ->
+                               true;
+                           [#resource{quantity = V}] ->
+                               V > 0
+                       end
+               end
+             , Resources).
 
 -ifdef(TEST).
 search_tasks_test() ->
@@ -365,7 +405,7 @@ search_tasks_test() ->
                   , #task{task_id=2}
                   ]
                 , lists:sort(element( 2
-                                    , search_tasks(G1, #{}, #{})
+                                    , search_tasks(G1, #{})
                                     ))
                 ),
     {ok, G2} = add_dependencies(G1, [ {0, 1}
@@ -373,20 +413,17 @@ search_tasks_test() ->
                                     , {1, 2}
                                     ]),
     ?assertEqual( {ok, [#task{task_id=0}]}
-                , search_tasks(G2, #{}, #{})
+                , search_tasks(G2, #{})
                 ),
     ?assertEqual( {ok, []}
-                , search_tasks(G2, map_sets:from_list([undefined]), #{})
-                ),
-    ?assertEqual( {ok, []}
-                , search_tasks(G2, #{}, map_sets:from_list([0]))
+                , search_tasks(G2, map_sets:from_list([0]))
                 ),
     {ok, G3} = complete_task(G2, 0, undefined),
     ?assertEqual( {ok, [#task{task_id=1}]}
-                , search_tasks(G3, #{}, #{})
+                , search_tasks(G3, #{})
                 ),
     {ok, G4} = complete_task(G3, 1, undefined),
     ?assertEqual( {ok, [#task{task_id=2}]}
-                , search_tasks(G4, #{}, #{})
+                , search_tasks(G4, #{})
                 ).
 -endif.

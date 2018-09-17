@@ -2,7 +2,7 @@
 
 -behaviour(gen_server).
 
--include_lib("task_graph/include/task_graph.hrl").
+-include("task_graph_int.hrl").
 
 %% API
 -export([ run_graph/3
@@ -99,7 +99,8 @@ run_graph(TaskName, Settings, Tasks) ->
 %%%===================================================================
 
 init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
-    Graph = task_graph_lib:new_graph(TaskName),
+    ResourceLimits = maps:get(resources, Settings, #{}),
+    Graph = task_graph_lib:new_graph(TaskName, ResourceLimits),
     try
         {ok, Graph1} = push_tasks(Tasks, Graph, EventMgr, undefined),
         JobLimit = maps:get(jobs, Settings, infinity),
@@ -127,7 +128,7 @@ handle_cast({complete_task, Ref, _Success = false, Return, _}, State) ->
 handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
     #state{ graph = G0
           } = State,
-    event({complete_task, Ref}, State),
+    event(complete_task, Ref, State),
     {ok, G1} = task_graph_lib:complete_task(G0, Ref, Return),
     State1 =
         case push_tasks(NewTasks, State#state{graph = G1}, undefined) of
@@ -160,13 +161,11 @@ handle_cast(maybe_pop_tasks, State) ->
     #state{ graph = G
           , current_tasks = CurrentlyRunningTasks
           } = State,
-    SaturatedSchedulers = map_sets:new(), %% TODO
-    event(pop_tasks, State),
+    event(shed_begin, State),
     case is_success(State) of
         true ->
             %% There are no failed tasks, proceed
             {ok, Tasks0} = task_graph_lib:search_tasks( G
-                                                      , SaturatedSchedulers
                                                       , CurrentlyRunningTasks
                                                       ),
             case State#state.global_job_limit of
@@ -181,6 +180,7 @@ handle_cast(maybe_pop_tasks, State) ->
             %% Something's failed, don't schedule new tasks
             Tasks = []
     end,
+    event(shed_end, State),
     case Tasks of
         [] ->
             case is_complete(State) of
@@ -193,7 +193,7 @@ handle_cast(maybe_pop_tasks, State) ->
             end;
         _ ->
             %% Schedule new tasks
-            event({scheduled_tasks, Tasks}, State),
+            event(scheduled_tasks, Tasks, State),
             State2 = lists:foldl( fun run_task/2
                                 , State
                                 , Tasks
@@ -223,14 +223,24 @@ code_change(_OldVsn, State, _Extra) ->
 push_tasks(NewTasks, #state{graph = G0, event_mgr = EventMgr}, Parent) ->
     push_tasks(NewTasks, G0, EventMgr, Parent).
 push_tasks(NewTasks = {Vertices, Edges}, G0, EventMgr, Parent) ->
-    event({add_tasks, Vertices}, EventMgr),
-    event({add_dependencies, Edges}, EventMgr),
-    task_graph_lib:expand(G0, NewTasks, Parent).
+    event(extend_begin, EventMgr),
+    event(add_tasks, Vertices, EventMgr),
+    event(add_dependencies, Edges, EventMgr),
+    Ret = task_graph_lib:expand(G0, NewTasks, Parent),
+    event(extend_end, EventMgr),
+    Ret.
 
-event(Term, #state{event_mgr = EventMgr}) ->
-    gen_event:notify(EventMgr, Term);
-event(Term, EventMgr) when is_pid(EventMgr) ->
-    gen_event:notify(EventMgr, Term).
+event(A, B) ->
+    event(A, undefined, B).
+event(Kind, Data, #state{event_mgr = EventMgr}) ->
+    event(Kind, Data, EventMgr);
+event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
+    gen_event:notify( EventMgr
+                    , #tg_event{ timestamp = erlang:system_time(?tg_timeUnit)
+                               , kind = Kind
+                               , data = Data
+                               }
+                    ).
 
 complete_graph(State = #state{parent = Pid, failed_tasks = Failed}) ->
     %% Assert:
@@ -241,7 +251,7 @@ complete_graph(State = #state{parent = Pid, failed_tasks = Failed}) ->
                  false ->
                      {error, Failed}
              end,
-    event({graph_complete, self(), Result}, State),
+    event(graph_complete, [self(), Result], State),
     Pid ! {result, self(), Result},
     {stop, normal, State}.
 
@@ -254,7 +264,7 @@ is_complete(State) ->
 push_error(Ref, Error, State) ->
     OldFailedTasks = State#state.failed_tasks,
     OldCurrentTasks = State#state.current_tasks,
-    event({task_failed, Ref, Error}, State),
+    event(task_failed, [Ref, Error], State),
     State#state{ failed_tasks = OldFailedTasks#{Ref => Error}
                , current_tasks = maps:remove(Ref, OldCurrentTasks)
                }.
@@ -281,8 +291,8 @@ defer_task(Parent, Ref, NewTasks) ->
 
 -spec run_task(task_graph_lib:task(), #state{}) -> #state{}.
 run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT, graph = G}) ->
-    GetDepResult = fun(Ref) ->
-                           task_graph_lib:get_task_result(G, Ref)
+    GetDepResult = fun(Ref1) ->
+                           task_graph_lib:get_task_result(G, Ref1)
                    end,
     Pid = spawn_worker(Task, todo_undefined, State#state.event_mgr, GetDepResult),
     State#state{current_tasks = TT#{Ref => Pid}}.
@@ -296,7 +306,7 @@ spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, Eve
     Parent = self(),
     spawn_link(
       fun() ->
-          event({spawn_task, Ref, self()}, EventMgr),
+          event(spawn_task, [Ref, self()], EventMgr),
           try
 
               Return =
