@@ -1,23 +1,23 @@
 -module(test_worker).
 -behavior(task_graph_runner).
 
--export([run_task/4]).
+-export([run_task/3]).
 
 -include("task_graph_test.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("task_graph/include/task_graph.hrl").
 
-run_task(_State, Ref, error, _GetDepsResult) ->
+run_task(Ref, error, _GetDepsResult) ->
     {error, oh_no_task_failed, Ref};
-run_task(_State, Ref, exception, _GetDepsResult) ->
+run_task(Ref, exception, _GetDepsResult) ->
     error({oh_no_task_crashed, Ref});
-run_task(_State, Ref, Opts = #{deps := Deps}, GetDepsResult) ->
+run_task(Ref, Opts = #{deps := Deps}, GetDepsResult) ->
     ?assertEqual(true, check_deps(Deps)),
     check_dep_results(Ref, GetDepsResult, Deps),
     Result = check_dynamic_deps(Ref, Opts, GetDepsResult),
     increase_ran_counter(Ref),
     Result;
-run_task(_State, Ref, #{}, _) ->
+run_task(Ref, #{}, _) ->
     increase_ran_counter(Ref),
     {ok, {}}.
 

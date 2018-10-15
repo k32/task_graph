@@ -294,15 +294,14 @@ run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT, graph =
     GetDepResult = fun(Ref1) ->
                            task_graph_lib:get_task_result(G, Ref1)
                    end,
-    Pid = spawn_worker(Task, todo_undefined, State#state.event_mgr, GetDepResult),
+    Pid = spawn_task(Task, State#state.event_mgr, GetDepResult),
     State#state{current_tasks = TT#{Ref => Pid}}.
 
--spec spawn_worker( task_graph_lib:task()
-                  , term()
-                  , event_mgr()
-                  , fun((task_graph_lib:task_id()) -> {ok, term()} | error)
-                  ) -> pid().
-spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, EventMgr, GetDepResult) ->
+-spec spawn_task( task_graph_lib:task()
+                , event_mgr()
+                , fun((task_graph_lib:task_id()) -> {ok, term()} | error)
+                ) -> pid().
+spawn_task(#task{task_id = Ref, execute = Exec, data = Data}, EventMgr, GetDepResult) ->
     Parent = self(),
     spawn_link(
       fun() ->
@@ -311,7 +310,7 @@ spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, Eve
 
               Return =
                   if is_atom(Exec) ->
-                          Exec:run_task(WorkerState, Ref, Data, GetDepResult);
+                          Exec:run_task(Ref, Data, GetDepResult);
                      is_function(Exec) ->
                           Exec(Ref, Data, GetDepResult)
                   end,
@@ -321,13 +320,6 @@ spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, Eve
                   {ok, Result} ->
                       complete_task(Parent, Ref, true, Result);
                   {ok, Result, NewTasks} ->
-                      complete_task(Parent, Ref, true, Result, NewTasks);
-
-                  unchanged ->
-                      complete_task(Parent, Ref, true, undefined);
-                  {unchanged, Result} ->
-                      complete_task(Parent, Ref, true, Result);
-                  {unchanged, Result, NewTasks} ->
                       complete_task(Parent, Ref, true, Result, NewTasks);
 
                   {defer, NewTasks} ->

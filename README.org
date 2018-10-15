@@ -4,11 +4,11 @@
 
 * Description
 
-Yet another library reinventing good old /make/, implemented in pure
+Yet another library rethinking good old /make/, implemented in pure
 Erlang. This library aims to do one thing right: it runs tasks in
 parallel in topological order. Hence it doesn't do globing,
 templating, it doesn't provide any DSLs, and generally doesn't care
-about nature of tasks it executes.
+about the nature of tasks it executes.
 
 * Features
 ** Dynamic tasks
@@ -18,37 +18,21 @@ dynamically
 
 ** Painstakingly tested
 
-Random task graph topologies are tested using [[http://proper.softlab.ntua.gr/][proper]].
+Random task graph topologies are tested using [[http://proper.softlab.ntua.gr/][proper]]. Most of the
+code in this repo is tests.
 
-** Resources
+** TODO Resources
 
-=task_graph= further develops the conception of =make -j N= flag.
+=task_graph= further develops the concept of =make -j N= flag.
 Instead of simply limiting the total number of parallel tasks,
 =task_graph= allows to tag tasks with a list of so called
-=resources=. Tags don't bear any meaning for =task_graph= itself, so
-users are free to associate them with any application specific
-entities, such as =poolboy= workers, network connections, RAM or
-CPU demanding tasks.
-
-Example, how to emulate =make -j N= flag:
-
-#+BEGIN_SRC erlang
-%% Define tasks:
-Tasks = [#task{ task_id = I
-              , execute = fun(MyId, MyData) ->
-                              io:format("I'm ~p, doing ~p~n", [MyId, MyData])
-                          end,
-              , data = something
-              %% Demand `jobs' resource:
-              , resources = [jobs]
-              }
-         || I <- lists:seq(1, 4)],
-Settings = #{resources => #{jobs => 3}},
-{ok, _} = task_graph:run_graph(my_graph, Settings, {Tasks, Edges}).
-#+END_SRC
+=resources=. These tags don't bear any meaning for =task_graph=
+itself, so users are free to associate them with any application
+specific entities, such as =poolboy= workers, network connections, RAM
+or CPU demanding tasks.
 
 The concept of resources may seem too abstract, but it allows to
-offload resource allocation to third-party apps.
+offload resource allocation to third-party apps, e.g. =poolboy=
 
 ** Written with build flow optimization in mind
 
@@ -104,3 +88,30 @@ Render the resulting file using graphviz:
 #+BEGIN_SRC bash
 dot -Tpng -O dependencies.dot
 #+END_SRC
+
+How to emulate =make -j N= flag using =resources=:
+
+#+BEGIN_SRC erlang
+%% Define tasks:
+Tasks = [#task{ task_id = I
+              , execute = fun(MyId, MyData) ->
+                              io:format("I'm ~p, doing ~p~n", [MyId, MyData])
+                          end,
+              , data = something
+              %% Demand `jobs' resource:
+              , resources = [jobs]
+              }
+         || I <- lists:seq(1, 4)],
+%% Specify resource capacity:
+Settings = #{resources => #{jobs => 3}},
+{ok, _} = task_graph:run_graph(my_graph, Settings, {Tasks, Edges}).
+#+END_SRC
+
+:hidden:
+Design goals:
+ + Focus on doing one thing
+ + Give users powerful abstactions instead of numerous features
+ + But reserve all the abstactions for the user; internal
+   implementation should be lean and fast
+ + Features that are not =proper=-tested don't exist
+:END:
