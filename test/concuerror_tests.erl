@@ -13,7 +13,7 @@ gc_test() ->
     ets:new(?TEST_TABLE, [ set
                          , public
                          , named_table
-                         , {keypos, #test_table.task_id}
+                         , {keypos, #test_table.id}
                          ]),
     Edges = [{1, 2}, {1, 3}, {2, 3}, {2, 4}, {1, dynamic}],
     Tasks = [#task{ task_id = I
@@ -44,7 +44,7 @@ gc_test() ->
     Result = task_graph:run_graph(foo, DAG),
     lists:foreach( fun(I) ->
                            ?assertEqual( {I, true}
-                                       , {I, ets:member(?TEST_TABLE, I)}
+                                       , {I, ets:member(?TEST_TABLE, {task, I})}
                                        )
                    end
                  , [defer, dynamic | lists:seq(1, 5)]

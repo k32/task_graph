@@ -353,7 +353,7 @@ task_to_vertex(#task{task_id = Ref, execute = E, data = D, resources = R}) ->
     #vertex{ task_id = Ref
            , execute = E
            , data = D
-           , resources = R
+           , resources = lists:usort(R)
            }.
 
 -spec vertex_to_task(#vertex{}) -> #task{}.
@@ -363,8 +363,6 @@ vertex_to_task(#vertex{task_id = Ref, execute = E, data = D}) ->
          , data = D
          }.
 
-%% Safe to use only for 1st-rank dependencies, the rest of the values
-%% may be GC'd
 -spec get_task_result(task_graph(), task_id()) -> {ok, term()} | error.
 get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
     case ets:lookup(VV, Ref) of

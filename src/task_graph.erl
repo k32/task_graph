@@ -64,7 +64,7 @@ run_graph(TaskName, Settings, Tasks) ->
     lists:foreach( fun({Handler, Args}) ->
                            gen_event:add_handler(EventMgr, Handler, Args)
                    end
-                 , maps:get(event_handlers, Settings, [])
+                 , maps:get(event_handler0, Settings, [])
                  ),
     Ret = gen_server:start( {local, TaskName}
                           , ?MODULE
@@ -337,11 +337,12 @@ spawn_worker(#task{task_id = Ref, execute = Exec, data = Data}, WorkerState, Eve
                       complete_task(Parent, Ref, false, Reason)
               end
           catch
-              _:Err ->
+              _:Err ?BIND_STACKTRACE(Stack) ->
+                  ?GET_STACKTRACE(Stack),
                   complete_task( Parent
                                , Ref
                                , _success = false
-                               , {uncaught_exception, Err, erlang:get_stacktrace()}
+                               , {uncaught_exception, Err, Stack}
                                )
           end
       end).

@@ -1,4 +1,6 @@
 -module(task_graph_SUITE).
+
+%% Common test callbacks:
 -export([ suite/0
         , all/0
         , init_per_testcase/2
@@ -11,17 +13,17 @@
         , t_topology_succ/1
         , t_topology/1
         , t_error_handling/1
+        , t_resources/1
         ]).
+
+%%%===================================================================
+%%% Macros
+%%%===================================================================
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("proper/include/proper.hrl").
 -include_lib("task_graph/include/task_graph.hrl").
 -include("task_graph_test.hrl").
-
-all() ->
-    [ t_evt_draw_deps, t_evt_build_flow, t_error_handling, t_topology
-    , t_topology_succ
-    ].
 
 -define(TIMEOUT, 60).
 -define(NUMTESTS, 1000).
@@ -42,17 +44,40 @@ all() ->
             true = Result
         end).
 
-error_handling() ->
-    ?FORALL(DAG, dag(inject_errors()),
-            ?IMPLIES(expected_errors(DAG) /= [],
+%%%===================================================================
+%%% Testcases and properties
+%%%===================================================================
+
+%% Test that dependencies are resolved in a correct order and all
+%% tasks are executed for any proper acyclic graph
+t_topology_succ(_Config) ->
+    ?RUN_PROP(topology_succ),
+    ok.
+
+topology_succ() ->
+    ?FORALL(DAG0, dag(),
             begin
+                {Vertices0, Edges} = DAG0,
+                Vertices =
+                    [ T0#task{ data = #{deps => [From || {From, To} <- Edges, To =:= I]}
+                             }
+                      || T0 = #task{task_id = I} <- Vertices0],
                 reset_table(),
-                ExpectedErrors = expected_errors(DAG),
-                {error, Result} = task_graph:run_graph(foo, DAG),
-                map_sets:is_subset( Result
-                                  , map_sets:from_list(ExpectedErrors)
-                                  )
-            end)).
+                DAG = {Vertices, Edges},
+                {ok, _} = task_graph:run_graph(foo, DAG),
+                %% Check that all tasks have been executed:
+                _AllRun = lists:foldl( fun(#task{task_id = Task}, Acc) ->
+                                               Acc andalso ets:member(?TEST_TABLE, {task, Task})
+                                       end
+                                     , true
+                                     , element(1, DAG)
+                                     )
+            end).
+
+%% Test that cyclic dependencies can be detected
+t_topology(_Config) ->
+    ?RUN_PROP(topology),
+    ok.
 
 topology() ->
     ?FORALL(L0, list({nat(), nat()}),
@@ -88,36 +113,51 @@ topology() ->
                 end
             end).
 
-topology_succ() ->
-    ?FORALL(DAG, dag(),
-            begin
-                reset_table(),
-                Filename = integer_to_list(erlang:monotonic_time()) ++ ".log",
-                {ok, _} = task_graph:run_graph(foo, DAG),
-                %% Check that all tasks have been executed:
-                AllRun = lists:foldl( fun(#task{task_id = Task}, Acc) ->
-                                              Acc andalso ets:member(?TEST_TABLE, Task)
-                                      end
-                                    , true
-                                    , element(1, DAG)
-                                    )
-            end).
-
-%% Test that dependencies are resolved in a correct order and all
-%% tasks are executed for any proper acyclic graph
-t_topology_succ(_Config) ->
-    ?RUN_PROP(topology_succ),
-    ok.
-
-%% Test that cyclic dependencies can be detected
-t_topology(_Config) ->
-    ?RUN_PROP(topology),
-    ok.
-
 %% Check that errors in the tasks are reported
 t_error_handling(_Config) ->
     ?RUN_PROP(error_handling),
     ok.
+
+error_handling() ->
+    ?FORALL(DAG, dag(inject_errors()),
+            ?IMPLIES(expected_errors(DAG) /= [],
+            begin
+                reset_table(),
+                ExpectedErrors = expected_errors(DAG),
+                {error, Result} = task_graph:run_graph(foo, DAG),
+                map_sets:is_subset( Result
+                                  , map_sets:from_list(ExpectedErrors)
+                                  )
+            end)).
+
+%% Check that resource constraints are respected
+t_resources(_Config) ->
+    ?RUN_PROP(resources),
+    ok.
+
+resources() ->
+    MaxCapacity = 20,
+    MaxNumberOfResorces = 10,
+    ?FORALL(
+       {NResources, Capacity, DAG0},
+       ?LET(NResources, range(1, MaxNumberOfResorces),
+            {NResources, range(1, MaxCapacity), dag(list(range(1, NResources)))}),
+       begin
+           reset_table(),
+           Limits = maps:from_list([{I, Capacity}
+                                    || I <- lists:seq(1, NResources)]),
+           {Vertices0, Edges} = DAG0,
+           Vertices =
+               [T0#task{ resources = RR
+                       , data = #{deps => []}
+                       }
+                || T0 = #task{data = RR} <- Vertices0],
+           Opts = #{ resources => Limits
+
+                   },
+           {ok, _} = task_graph:run_graph(foo, Opts, {Vertices, Edges}),
+           true
+       end).
 
 %% Check that task spawn events are reported, collected and processed
 %% to nice graphs
@@ -180,15 +220,19 @@ t_evt_build_flow(_Config) ->
                     ),
     ok.
 
-%% Proper generator for directed acyclic graphs:
+%%%===================================================================
+%%% Proper generators
+%%%===================================================================
+
+%% Proper generator of directed acyclic graphs:
 dag() ->
-    dag(static_deps_check()).
-%% ...supply custom data to tasks:
-dag(Fun) ->
-    dag(Fun, 2, 4).
+    dag(#{deps => []}).
+%% ...supply custom data to tasks (`Payload' is a proper generator)
+dag(Payload) ->
+    dag(Payload, 2, 4).
 %% ...adjust magic parameters X and Y governing graph topology:
-dag(Fun, X, Y) ->
-    ?LET(Mishmash, list({{nat(), nat()}, {Fun, Fun}}),
+dag(Payload, X, Y) ->
+    ?LET(Mishmash, list({{nat(), nat()}, {Payload, Payload}}),
           begin
               {L0, Data0} = lists:unzip(Mishmash), %% Separate vertex IDs and data
               %% Shrink vertex space to get more interesting graphs:
@@ -202,51 +246,55 @@ dag(Fun, X, Y) ->
                                   , length(Vertices)
                                   ),
               Tasks = [#task{ task_id = I
+                            , data = Payload
                             , execute = test_worker
-                            , data = Fun(I, [From || {From, To} <- Edges, To =:= I])
-                            , resources = [task]
                             }
-                       || {I, Fun} <- lists:zip(Vertices, Data)],
+                       || {I, Payload} <- lists:zip(Vertices, Data)],
               {Tasks, Edges}
           end).
 
-static_deps_check() ->
-    fun(_Self, Deps) ->
-            #{deps => Deps}
-    end.
-
-skip_deps_check() ->
-    fun(_Self, _Deps) ->
-            #{deps => []}
-    end.
-
 inject_errors() ->
-    frequency([ {1, fun(_, _) -> error end}
-              , {1, fun(_, _) -> exception end}
-              , {5, skip_deps_check()}
+    frequency([ {1, error}
+              , {1, exception}
+              , {5, #{deps => []}}
               ]).
+
+%%%===================================================================
+%%% Utility functions:
+%%%===================================================================
 
 expected_errors(DAG) ->
     {Vertices, _} = DAG,
     [Id || #task{task_id = Id, data = D} <- Vertices,
            D =:= error orelse D =:= exception].
 
-suite() ->
-    [{timetrap,{seconds, ?TIMEOUT}}].
-
 reset_table() ->
     ets:delete_all_objects(?TEST_TABLE).
+
+%%%===================================================================
+%%% CT boilerplate
+%%%===================================================================
+
+suite() ->
+    [{timetrap,{seconds, ?TIMEOUT}}].
 
 init_per_testcase(_, Config) ->
     ets:new(?TEST_TABLE, [ set
                          , public
                          , named_table
-                         , {keypos, #test_table.task_id}
+                         , {keypos, #test_table.id}
                          ]),
     Config.
 
 end_per_testcase(_, Config) ->
     ets:delete(?TEST_TABLE),
     Config.
+
+all() ->
+    [F || {F, _A} <- module_info(exports),
+          case atom_to_list(F) of
+              "t_" ++ _ -> true;
+              _         -> false
+          end].
 
 %% Quick view: cat > graph.dot ; dot -Tpng -O graph.dot; xdg-open graph.dot.png
