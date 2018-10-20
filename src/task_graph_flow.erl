@@ -13,7 +13,7 @@
 
 -record(state,
         { fd       :: file:io_device()
-        , start_ts :: erlang:timestamp()
+        , start_ts :: integer()
         }).
 
 %%%===================================================================

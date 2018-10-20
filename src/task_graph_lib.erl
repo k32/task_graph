@@ -300,7 +300,7 @@ pre_schedule_tasks(Graph, ExcludedTasks) ->
 
 -spec alloc_resources( ets:tid()
                      , [resource_id()]
-                     ) -> task_graph().
+                     ) -> ok.
 alloc_resources(RT, RR) ->
     lists:foreach( fun(I) ->
                            ets:update_counter(RT, I, {#resource.quantity, -1})
@@ -419,35 +419,35 @@ resources_available(RR, Resources) ->
 
 -ifdef(TEST).
 search_tasks_test() ->
-    G0 = new_graph(foo),
-    {ok, G1} = add_tasks(G0, [ #tg_task{task_id = 0}
-                             , #tg_task{task_id = 1}
-                             , #tg_task{task_id = 2}
-                             ]),
+    G = new_graph(foo),
+    {ok, _} = add_tasks(G, [ #tg_task{task_id = 0}
+                           , #tg_task{task_id = 1}
+                           , #tg_task{task_id = 2}
+                           ]),
     ?assertEqual( [ #tg_task{task_id=0}
                   , #tg_task{task_id=1}
                   , #tg_task{task_id=2}
                   ]
                 , lists:sort(element( 2
-                                    , pre_schedule_tasks(G1, #{})
+                                    , pre_schedule_tasks(G, #{})
                                     ))
                 ),
-    {ok, G2} = add_dependencies(G1, [ {0, 1}
-                                    , {0, 2}
-                                    , {1, 2}
-                                    ]),
+    {ok, _} = add_dependencies(G, [ {0, 1}
+                                  , {0, 2}
+                                  , {1, 2}
+                                  ]),
     ?assertEqual( {ok, [#tg_task{task_id=0}]}
-                , pre_schedule_tasks(G2, #{})
+                , pre_schedule_tasks(G, #{})
                 ),
     ?assertEqual( {ok, []}
-                , pre_schedule_tasks(G2, map_sets:from_list([0]))
+                , pre_schedule_tasks(G, map_sets:from_list([0]))
                 ),
-    {ok, G3} = complete_task(G2, 0, undefined),
+    ok = complete_task(G, 0, undefined),
     ?assertEqual( {ok, [#tg_task{task_id=1}]}
-                , pre_schedule_tasks(G3, #{})
+                , pre_schedule_tasks(G, #{})
                 ),
-    {ok, G4} = complete_task(G3, 1, undefined),
+    ok = complete_task(G, 1, undefined),
     ?assertEqual( {ok, [#tg_task{task_id=2}]}
-                , pre_schedule_tasks(G4, #{})
+                , pre_schedule_tasks(G, #{})
                 ).
 -endif.
