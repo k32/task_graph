@@ -9,12 +9,6 @@
 -define(tg_timeUnit, milli_seconds).
 -endif.
 
--record(tg_event,
-        { timestamp :: integer()
-        , kind      :: atom()
-        , data      :: term() | undefined
-        }).
-
 -ifdef(OTP_RELEASE).
 -define(BIND_STACKTRACE(V), : V).
 -define(GET_STACKTRACE(V), ok).

@@ -38,7 +38,6 @@
                                                     #worker_pool{}}
         %% , results    :: #{task_id() => term()}
         , parent                           :: pid()
-        , global_job_limit                 :: non_neg_integer() | infinity
         }).
 
 %%%===================================================================
@@ -64,7 +63,7 @@ run_graph(TaskName, Settings, Tasks) ->
     lists:foreach( fun({Handler, Args}) ->
                            gen_event:add_handler(EventMgr, Handler, Args)
                    end
-                 , maps:get(event_handler0, Settings, [])
+                 , maps:get(event_handlers, Settings, [])
                  ),
     Ret = gen_server:start( {local, TaskName}
                           , ?MODULE
@@ -103,7 +102,6 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
     Graph = task_graph_lib:new_graph(TaskName, ResourceLimits),
     try
         {ok, Graph1} = push_tasks(Tasks, Graph, EventMgr, undefined),
-        JobLimit = maps:get(jobs, Settings, infinity),
         %% io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
         maybe_pop_tasks(),
         {ok, #state{ graph = Graph1
@@ -111,7 +109,6 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
                    , event_mgr = EventMgr
                    %% , result = #{}
                    , parent = Parent
-                   , global_job_limit = JobLimit
                    }}
     catch
         _:{badmatch,{error, circular_dependencies, Cycle}} ->
@@ -126,15 +123,14 @@ handle_cast({complete_task, Ref, _Success = false, Return, _}, State) ->
     maybe_pop_tasks(),
     {noreply, push_error(Ref, Return, State)};
 handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
-    #state{ graph = G0
+    #state{ graph = G
           } = State,
     event(complete_task, Ref, State),
-    {ok, G1} = task_graph_lib:complete_task(G0, Ref, Return),
+    ok = task_graph_lib:complete_task(G, Ref, Return),
     State1 =
-        case push_tasks(NewTasks, State#state{graph = G1}, undefined) of
+        case push_tasks(NewTasks, State#state{graph = G}, undefined) of
             {ok, G2} ->
-                State#state{ graph = G2
-                           , current_tasks =
+                State#state{ current_tasks =
                                  maps:remove(Ref, State#state.current_tasks)
                            };
             Err ->
@@ -165,17 +161,9 @@ handle_cast(maybe_pop_tasks, State) ->
     case is_success(State) of
         true ->
             %% There are no failed tasks, proceed
-            {ok, Tasks0} = task_graph_lib:search_tasks( G
-                                                      , CurrentlyRunningTasks
-                                                      ),
-            case State#state.global_job_limit of
-                infinity ->
-                    Tasks = Tasks0;
-                N ->
-                    Tasks = lists:sublist( Tasks0
-                                         , N - maps:size(CurrentlyRunningTasks)
-                                         )
-            end;
+            {ok, Tasks} = task_graph_lib:pre_schedule_tasks( G
+                                                           , CurrentlyRunningTasks
+                                                           );
         false ->
             %% Something's failed, don't schedule new tasks
             Tasks = []
@@ -193,7 +181,6 @@ handle_cast(maybe_pop_tasks, State) ->
             end;
         _ ->
             %% Schedule new tasks
-            event(scheduled_tasks, Tasks, State),
             State2 = lists:foldl( fun run_task/2
                                 , State
                                 , Tasks
@@ -222,6 +209,9 @@ code_change(_OldVsn, State, _Extra) ->
                    | {error, term()}.
 push_tasks(NewTasks, #state{graph = G0, event_mgr = EventMgr}, Parent) ->
     push_tasks(NewTasks, G0, EventMgr, Parent).
+
+push_tasks({[], []}, G, _, _) ->
+    {ok, G};
 push_tasks(NewTasks = {Vertices, Edges}, G0, EventMgr, Parent) ->
     event(extend_begin, EventMgr),
     event(add_tasks, Vertices, EventMgr),
@@ -290,7 +280,10 @@ defer_task(Parent, Ref, NewTasks) ->
     gen_server:cast(Parent, {defer_task, Ref, NewTasks}).
 
 -spec run_task(task_graph_lib:task(), #state{}) -> #state{}.
-run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT, graph = G}) ->
+run_task( Task = #tg_task{task_id = Ref}
+        , State = #state{ current_tasks = TT
+                        , graph = G
+                        }) ->
     GetDepResult = fun(Ref1) ->
                            task_graph_lib:get_task_result(G, Ref1)
                    end,
@@ -301,13 +294,15 @@ run_task(Task = #task{task_id = Ref}, State = #state{current_tasks = TT, graph =
                 , event_mgr()
                 , fun((task_graph_lib:task_id()) -> {ok, term()} | error)
                 ) -> pid().
-spawn_task(#task{task_id = Ref, execute = Exec, data = Data}, EventMgr, GetDepResult) ->
+spawn_task(Task = #tg_task{ task_id = Ref
+                          , execute = Exec
+                          , data = Data
+                          }, EventMgr, GetDepResult) ->
     Parent = self(),
     spawn_link(
       fun() ->
-          event(spawn_task, [Ref, self()], EventMgr),
+          event(spawn_task, Task#tg_task.task_id, EventMgr),
           try
-
               Return =
                   if is_atom(Exec) ->
                           Exec:run_task(Ref, Data, GetDepResult);

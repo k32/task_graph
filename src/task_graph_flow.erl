@@ -31,8 +31,8 @@ init(Args) ->
                , start_ts = erlang:system_time(?tg_timeUnit)
                }}.
 
-handle_event(#tg_event{timestamp = Ts, kind = spawn_task, data = [Ref, _]}, State) ->
-    log(Ts, spawn, Ref, State),
+handle_event(#tg_event{timestamp = Ts, kind = spawn_task, data = Task}, State) ->
+    log(Ts, spawn, Task, State),
     {ok, State};
 handle_event(#tg_event{timestamp = Ts, kind = Evt, data = Ref}, State)
   when Evt =:= complete_task; Evt =:= task_failed ->

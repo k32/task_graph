@@ -34,7 +34,7 @@ check_dynamic_deps(Self, Opts, GetDepResult) ->
         {#{defer := Defer}, 0} ->
             {defer, Defer};
         {#{defer := {Deps, _}}, 1} ->
-            DepIds = [I || #task{task_id = I} <- Deps],
+            DepIds = [I || #tg_task{task_id = I} <- Deps],
             ?assertEqual(true, check_deps(DepIds)),
             check_dep_results(Self, GetDepResult, DepIds),
             {ok, {result, Self}};

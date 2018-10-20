@@ -41,7 +41,7 @@ handle_event(#tg_event{kind = add_tasks, data = Tasks}, #state{fd=FD} = State) -
               , "  ~p[~s];~n"
               , [Ref, StyleFun(Task)]
               )
-     || Task = #task{task_id = Ref} <- Tasks],
+     || Task = #tg_task{task_id = Ref} <- Tasks],
     {ok, State};
 handle_event(#tg_event{kind = add_dependencies, data = Deps}, #state{fd=FD} = State) ->
     [io:format(FD, "  ~p -> ~p;~n"

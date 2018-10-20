@@ -18,10 +18,10 @@ dynamically
 
 ** Painstakingly tested
 
-Random task graph topologies are tested using [[http://proper.softlab.ntua.gr/][proper]]. Most of the
-code in this repo is tests.
+Random task graph topologies are tested using [[http://proper.softlab.ntua.gr/][proper]]. Most of the code
+in this repo is tests.
 
-** TODO Resources
+** Resources
 
 =task_graph= further develops the concept of =make -j N= flag.
 Instead of simply limiting the total number of parallel tasks,
