@@ -4,22 +4,17 @@
 
 -behaviour(gen_event).
 
--include_lib("task_graph/include/task_graph.hrl").
+-include("task_graph_int.hrl").
 
-%% gen_event callbacks
--export([init/1, handle_event/2, handle_call/2,
-         handle_info/2, terminate/2, code_change/3]).
+%% gen_event callbacks:
+-export([ init/1, handle_event/2, handle_call/2
+        , handle_info/2, terminate/2, code_change/3
+        ]).
 
 -record(state,
         { fd       :: file:io_device()
         , start_ts :: integer()
         }).
-
--ifndef(OLD_TIME_UNITS).
--define(timeUnit, millisecond).
--else.
--define(timeUnit, milli_seconds).
--endif.
 
 %%%===================================================================
 %%% API
@@ -33,23 +28,23 @@ init(Args) ->
     Filename = maps:get(filename, Args, "task_graph_flow.log"),
     {ok, FD} = file:open(Filename, [write]),
     {ok, #state{ fd = FD
-               , start_ts = erlang:monotonic_time()
+               , start_ts = erlang:system_time(?tg_timeUnit)
                }}.
 
-handle_event({spawn_task, Ref, _}, State) ->
-    log(spawn, Ref, State),
+handle_event(#tg_event{timestamp = Ts, kind = spawn_task, data = Task}, State) ->
+    log(Ts, spawn, Task, State),
     {ok, State};
-handle_event({Evt, Ref}, State)
+handle_event(#tg_event{timestamp = Ts, kind = Evt, data = Ref}, State)
   when Evt =:= complete_task; Evt =:= task_failed ->
-    log(Evt, Ref, State),
+    log(Ts, Evt, Ref, State),
     {ok, State};
 handle_event(_, State) ->
     {ok, State}.
 
-log(Event, Ref, #state{fd=FD, start_ts=T}) ->
-    Dt = erlang:convert_time_unit( erlang:monotonic_time() - T
+log(Ts, Event, Ref, #state{fd=FD, start_ts=T}) ->
+    Dt = erlang:convert_time_unit( Ts - T
                                  , native
-                                 , ?timeUnit
+                                 , ?tg_timeUnit
                                  ),
     io:format(FD, "~10B: ~p ~p~n", [Dt, Event, Ref]).
 
