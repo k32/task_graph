@@ -1,6 +1,6 @@
 #+TITLE: Yet another Erlang Make implementation
 
-[[https://travis-ci.org/k32/task_graph.svg?branch%3Dmaster]]
+[[https://travis-ci.org/k32/task_graph.svg?branch=master]]
 
 * Description
 
