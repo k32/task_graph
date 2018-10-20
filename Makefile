@@ -5,7 +5,7 @@ CONCUERROR_BIN:=Concuerror/_build/default/bin/concuerror
 all: build # concuerror_tests
 
 build:
-	rebar3 do compile,dialyzer,eunit,ct
+	rebar3 do compile,dialyzer,eunit,ct,cover
 
 # Concuerror doesn't support ets:take :(
 concuerror_tests: $(CONCUERROR_BIN)
@@ -15,3 +15,6 @@ $(CONCUERROR_BIN):
 	git clone https://github.com/parapluu/Concuerror.git && \
 	cd Concuerror && \
 	make
+
+coveralls:
+	rebar3 do cover -v, coveralls send

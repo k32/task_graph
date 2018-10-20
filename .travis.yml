@@ -5,5 +5,10 @@ otp_release:
   - 19.3
 
 script:
-  - set -e
-  - make
+  - |
+    set -e
+    make
+    OTP_VSN=`erl -noshell -eval 'io:format(erlang:system_info(otp_release)), halt(0)'`
+    if [ $OTP_VSN -eq 20 ]; then
+      make coveralls
+    fi
