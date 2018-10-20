@@ -17,4 +17,4 @@ $(CONCUERROR_BIN):
 	make
 
 coveralls:
-	rebar3 coveralls send
+	rebar3 do cover -v, coveralls send

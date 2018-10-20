@@ -36,8 +36,8 @@
 -include("task_graph_test.hrl").
 
 -define(TIMEOUT, 600).
--define(NUMTESTS, 1000).
--define(SIZE, 1000).
+-define(NUMTESTS, 10).
+-define(SIZE, 100).
 
 -define(RUN_PROP(PROP),
         begin
