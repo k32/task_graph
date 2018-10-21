@@ -14,6 +14,7 @@
         , t_topology/1
         , t_error_handling/1
         , t_resources/1
+        , t_defer/1
         %% , t_resources_nodeps/1 %% FIXME: Unstable
         ]).
 
@@ -39,7 +40,7 @@
 -define(NUMTESTS, 1000).
 -define(SIZE, 1000).
 
--define(RUN_PROP(PROP),
+-define(RUN_PROP(PROP, SIZE),
         begin
             %% Workaround against CT's "wonderful" features:
             OldGL = group_leader(),
@@ -47,12 +48,14 @@
             io:format(??PROP),
             Result = proper:quickcheck( PROP()
                                       , [ {numtests, ?NUMTESTS}
-                                        , {max_size, ?SIZE}
+                                        , {max_size, SIZE}
                                         ]
                                       ),
             group_leader(OldGL, self()),
             true = Result
         end).
+
+-define(RUN_PROP(PROP), ?RUN_PROP(PROP, ?SIZE)).
 
 %%%===================================================================
 %%% Testcases and properties
@@ -65,24 +68,89 @@ t_topology_succ(_Config) ->
     ok.
 
 topology_succ() ->
-    ?FORALL(DAG0, dag(),
+    ?FORALL(DAG, dag(),
             begin
-                {Vertices0, Edges} = DAG0,
-                Vertices =
-                    [ T0#tg_task{ data = #{deps => [From || {From, To} <- Edges, To =:= I]}
-                                }
-                      || T0 = #tg_task{task_id = I} <- Vertices0],
-                reset_table(),
-                DAG = {Vertices, Edges},
-                {ok, _} = task_graph:run_graph(foo, DAG),
-                %% Check that all tasks have been executed:
-                _AllRun = lists:foldl( fun(#tg_task{task_id = Task}, Acc) ->
-                                               Acc andalso ets:member(?TEST_TABLE, {task, Task})
-                                       end
-                                     , true
-                                     , element(1, DAG)
-                                     )
+                Opts = #{event_handlers => [send_back()]},
+                {ok, _} = task_graph:run_graph(foo, Opts, DAG),
+                Events = collect_events(),
+                %% Check that tasks are executed after their dependencies:
+                {Tasks, RanTimes} = lists:foldl( fun check_topology/2
+                                               , {#{}, #{}}
+                                               , Events
+                                               ),
+                %% Check that all tasks have been executed once:
+                lists:foreach( fun(Key) ->
+                                       %% Assert:
+                                       1 = maps:get(Key, RanTimes)
+                               end
+                             , maps:keys(Tasks)
+                             ),
+                true
             end).
+
+t_defer(_Config) ->
+    ?RUN_PROP(deferred, 100),
+    ok.
+
+deferred() ->
+    ?FORALL(DAG, dag(inject_deferred()),
+            begin
+                Opts = #{event_handlers => [send_back()]},
+                {ok, _} = task_graph:run_graph(foo, Opts, DAG),
+                Events = collect_events(),
+                %% Check that tasks are executed after their dependencies:
+                _ = lists:foldl( fun check_topology/2
+                               , {#{}, #{}}
+                               , Events
+                               ),
+                true
+            end).
+
+check_topology(#tg_event{kind = Kind, data = Evt}, {Tasks, RanTimes}) ->
+    case Kind of
+        add_tasks ->
+            NewTasks = lists:foldl( fun(Tid, Acc) ->
+                                            Id = fun(A) -> A end,
+                                            maps:update_with( Tid
+                                                            , Id
+                                                            , map_sets:new()
+                                                            , Acc
+                                                            )
+                                    end
+                                  , Tasks
+                                  , [Tid || #tg_task{task_id = Tid} <- Evt]
+                                  ),
+            {NewTasks, RanTimes};
+        add_dependencies ->
+            NewTasks = lists:foldl( fun({From, To}, Acc) ->
+                                            AddDeps =
+                                                fun(Old) when is_map(Old) ->
+                                                        map_sets:add_element(From, Old)
+                                                end,
+                                            maps:update_with( To
+                                                            , AddDeps
+                                                            , Acc
+                                                            )
+                                    end
+                                  , Tasks
+                                  , Evt
+                                  ),
+            {NewTasks, RanTimes};
+        spawn_task ->
+            #{Evt := Deps} = Tasks,
+            %% Assert:
+            lists:foreach( fun(DepId) ->
+                                   1 = maps:get(DepId, RanTimes)
+                           end
+                         , map_sets:to_list(Deps)
+                         ),
+            {Tasks, RanTimes};
+        complete_task ->
+            RanTimes2 = inc_counters([Evt], RanTimes),
+            {Tasks, RanTimes2};
+        _ ->
+            {Tasks, RanTimes}
+    end.
 
 %% Test that cyclic dependencies can be detected
 t_topology(_Config) ->
@@ -92,7 +160,6 @@ t_topology(_Config) ->
 topology() ->
     ?FORALL(L0, list({nat(), nat()}),
             begin
-                reset_table(),
                 %% Shrink vertex space a little to get more interesting graphs:
                 L1 = [{N div 2, M div 2} || {N, M} <- L0],
                 Edges = lists:filter(fun({A, B}) -> A /= B end, L1),
@@ -132,7 +199,6 @@ error_handling() ->
     ?FORALL(DAG, dag(inject_errors()),
             ?IMPLIES(expected_errors(DAG) /= [],
             begin
-                reset_table(),
                 ExpectedErrors = expected_errors(DAG),
                 {error, Result} = task_graph:run_graph(foo, DAG),
                 map_sets:is_subset( Result
@@ -311,7 +377,7 @@ t_evt_build_flow(_Config) ->
 
 %% Proper generator of directed acyclic graphs:
 dag() ->
-    dag(#{deps => []}).
+    dag(undefined).
 %% ...supply custom data to tasks (`Payload' is a proper generator)
 dag(Payload) ->
     dag(Payload, 2, 4).
@@ -341,7 +407,12 @@ dag(Payload, X, Y) ->
 inject_errors() ->
     frequency([ {1, error}
               , {1, exception}
-              , {5, #{deps => []}}
+              , {5, ok}
+              ]).
+
+inject_deferred() ->
+    frequency([ {5, ok}
+              , {1, {deferred, dag()}}
               ]).
 
 %%%===================================================================
@@ -352,9 +423,6 @@ expected_errors(DAG) ->
     {Vertices, _} = DAG,
     [Id || #tg_task{task_id = Id, data = D} <- Vertices,
            D =:= error orelse D =:= exception].
-
-reset_table() ->
-    ets:delete_all_objects(?TEST_TABLE).
 
 send_back() ->
     {?MODULE, [self()]}.
@@ -372,7 +440,7 @@ collect_events(L) ->
 
 inc_counters(Keys, Map) ->
     lists:foldl( fun(Key, Acc) ->
-                         maps:update_with(Key, fun(V) -> V + 1 end, Acc)
+                         maps:update_with(Key, fun(V) -> V + 1 end, 1, Acc)
                  end
                , Map
                , Keys
@@ -380,7 +448,7 @@ inc_counters(Keys, Map) ->
 
 dec_counters(Keys, Map) ->
     lists:foldl( fun(Key, Acc) ->
-                         maps:update_with(Key, fun(V) -> V - 1 end, Acc)
+                         maps:update_with(Key, fun(V) -> V - 1 end, -1, Acc)
                  end
                , Map
                , Keys
@@ -419,15 +487,9 @@ suite() ->
     [{timetrap,{seconds, ?TIMEOUT}}].
 
 init_per_testcase(_, Config) ->
-    ets:new(?TEST_TABLE, [ set
-                         , public
-                         , named_table
-                         , {keypos, #test_table.id}
-                         ]),
     Config.
 
 end_per_testcase(_, Config) ->
-    ets:delete(?TEST_TABLE),
     Config.
 
 all() ->

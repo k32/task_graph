@@ -294,7 +294,7 @@ pre_schedule_tasks(Graph, ExcludedTasks) ->
                   not map_sets:is_element(Ref, ExcludedTasks),
                   %% Note: the below check actually has side effect,
                   %% it allocates resources:
-                  resources_available(RR, Resources)
+                  maybe_alloc_resources(RR, Resources)
               ],
     {ok, [T || {_, T} <- lists:keysort(1, Matches)]}.
 
@@ -397,10 +397,10 @@ get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
             error
     end.
 
--spec resources_available( ets:tid()
-                         , [resource_id()]
-                         ) -> boolean().
-resources_available(RR, Resources) ->
+-spec maybe_alloc_resources( ets:tid()
+                           , [resource_id()]
+                           ) -> boolean().
+maybe_alloc_resources(RR, Resources) ->
     lists:all( fun(I) ->
                        case ets:lookup(RR, I) of
                            [] ->
