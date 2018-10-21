@@ -142,6 +142,7 @@ handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
 handle_cast({defer_task, Ref, NewTasks}, State) ->
     #state{ current_tasks = Curr
           } = State,
+    event(defer_task, Ref, State),
     State1 =
         case push_tasks(NewTasks, State, {just, Ref}) of
             {ok, G1} ->
