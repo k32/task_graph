@@ -2,6 +2,8 @@
 
 [[https://travis-ci.org/k32/task_graph.svg?branch=master]]
 
+*This library has not been released yet, APIs _will_ be broken!*
+
 * Description
 
 Yet another library rethinking good old /make/, implemented in pure
@@ -16,11 +18,6 @@ about the nature of tasks it executes.
 Tasks may spawn other tasks or discover their own dependencies
 dynamically
 
-** Painstakingly tested
-
-Random task graph topologies are tested using [[http://proper.softlab.ntua.gr/][proper]]. Most of the code
-in this repo is tests.
-
 ** Resources
 
 =task_graph= further develops the concept of =make -j N= flag.
@@ -34,6 +31,11 @@ or CPU demanding tasks.
 The concept of resources may seem too abstract, but it allows to
 offload resource allocation to third-party apps, e.g. =poolboy=
 
+** Guards
+
+=task_graph= allows to define custom checks for whether the task
+should be executed or not. See =task_runner:guard/3= callback
+
 ** Written with build flow optimization in mind
 
 Sooner or later everyone wants to optimize their builds. =task_graph=
@@ -41,12 +43,10 @@ comes with a few helpful tools:
 
 *** Dependency graph visualization
 
-* Anti-features
+** Painstakingly tested
 
-As =task_graph= doesn't know anything about nature of the tasks, it
-can't automatically detect which tasks should be rebuilt. If you want
-this functionality, you can implement it by returning "changed"
-flag. In the future a helper may be added to mitigate this limitation.
+Random task graph topologies are tested using [[http://proper.softlab.ntua.gr/][proper]]. Most of the code
+in this repo is tests.
 
 * Examples
 
