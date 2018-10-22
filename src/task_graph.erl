@@ -36,7 +36,6 @@
         , failed_tasks = #{}               :: #{task_graph_lib:task_id() => term()}
         , workers                          :: #{task_graph_lib:task_execute() =>
                                                     #worker_pool{}}
-        %% , results    :: #{task_id() => term()}
         , parent                           :: pid()
         }).
 
@@ -126,7 +125,7 @@ handle_cast({complete_task, Ref, _Success = true, Return, NewTasks}, State) ->
     #state{ graph = G
           } = State,
     event(complete_task, Ref, State),
-    ok = task_graph_lib:complete_task(G, Ref, Return),
+    ok = task_graph_lib:complete_task(G, Ref, true, Return),
     State1 =
         case push_tasks(NewTasks, State#state{graph = G}, undefined) of
             {ok, G2} ->
@@ -269,8 +268,8 @@ maybe_pop_tasks() ->
                    , term()
                    , task_graph_lib:tasks()
                    ) -> ok.
-complete_task(Parent, Ref, Successp, Return, NewTasks) ->
-    gen_server:cast(Parent, {complete_task, Ref, Successp, Return, NewTasks}).
+complete_task(Parent, Ref, Success, Return, NewTasks) ->
+    gen_server:cast(Parent, {complete_task, Ref, Success, Return, NewTasks}).
 
 -spec complete_task(pid(), task_graph_lib:task_id(), boolean(), term()) -> ok.
 complete_task(Parent, Ref, Success, Return) ->
@@ -280,57 +279,90 @@ complete_task(Parent, Ref, Success, Return) ->
 defer_task(Parent, Ref, NewTasks) ->
     gen_server:cast(Parent, {defer_task, Ref, NewTasks}).
 
--spec run_task(task_graph_lib:task(), #state{}) -> #state{}.
-run_task( Task = #tg_task{task_id = Ref}
+-spec run_task({task_graph_lib:task(), boolean()}, #state{}) -> #state{}.
+run_task( {Task = #tg_task{task_id = Ref}, DepsUnchanged}
         , State = #state{ current_tasks = TT
                         , graph = G
                         }) ->
     GetDepResult = fun(Ref1) ->
                            task_graph_lib:get_task_result(G, Ref1)
                    end,
-    Pid = spawn_task(Task, State#state.event_mgr, GetDepResult),
+    Pid = spawn_task(Task, State#state.event_mgr, GetDepResult, DepsUnchanged),
     State#state{current_tasks = TT#{Ref => Pid}}.
 
 -spec spawn_task( task_graph_lib:task()
                 , event_mgr()
                 , fun((task_graph_lib:task_id()) -> {ok, term()} | error)
+                , boolean()
                 ) -> pid().
 spawn_task(Task = #tg_task{ task_id = Ref
                           , execute = Exec
                           , data = Data
-                          }, EventMgr, GetDepResult) ->
+                          }
+          , EventMgr
+          , GetDepResult
+          , DepsUnchanged
+          ) ->
     Parent = self(),
+    case Exec of
+        _ when is_atom(Exec) ->
+            RunTaskFun = fun Exec:run_task/3,
+            GuardFun   = fun Exec:guard/2;
+        _ when is_function(Exec) ->
+            RunTaskFun = Exec,
+            GuardFun   = fun(_, _) -> changed end;
+        {RunTaskFun, GuardFun} when is_function(RunTaskFun)
+                                  , is_function(GuardFun) ->
+            ok;
+        _ ->
+            RunTaskFun = undefined, %% D'oh!
+            GuardFun = undefined,
+            error({badtask, Exec})
+    end,
     spawn_link(
       fun() ->
-          event(spawn_task, Task#tg_task.task_id, EventMgr),
-          try
-              Return =
-                  if is_atom(Exec) ->
-                          Exec:run_task(Ref, Data, GetDepResult);
-                     is_function(Exec) ->
-                          Exec(Ref, Data, GetDepResult)
-                  end,
-              case Return of
-                  ok ->
-                      complete_task(Parent, Ref, true, undefined);
-                  {ok, Result} ->
-                      complete_task(Parent, Ref, true, Result);
-                  {ok, Result, NewTasks} ->
-                      complete_task(Parent, Ref, true, Result, NewTasks);
-
-                  {defer, NewTasks} ->
-                      defer_task(Parent, Ref, NewTasks);
-
-                  {error, Reason} ->
-                      complete_task(Parent, Ref, false, Reason)
-              end
-          catch
-              _:Err ?BIND_STACKTRACE(Stack) ->
-                  ?GET_STACKTRACE(Stack),
-                  complete_task( Parent
-                               , Ref
-                               , _success = false
-                               , {uncaught_exception, Err, Stack}
-                               )
-          end
+              event(spawn_task, Task#tg_task.task_id, EventMgr),
+              do_run_task( Parent
+                         , RunTaskFun
+                         , Task
+                         , GetDepResult
+                         )
       end).
+
+-spec do_run_task( pid()
+                 , fun()
+                 , task_graph_lib:task()
+                 , fun((task_graph_lib:task_id()) -> {ok, term()} | error)
+                 ) -> ok.
+do_run_task( Parent
+           , RunTaskFun
+           , Task = #tg_task{ task_id = Ref
+                            , data = Data
+                            }
+           , GetDepResult
+           ) ->
+    try
+        Return = RunTaskFun(Ref, Data, GetDepResult),
+        case Return of
+            ok ->
+                complete_task(Parent, Ref, true, undefined);
+            {ok, Result} ->
+                complete_task(Parent, Ref, true, Result);
+            {ok, Result, NewTasks} ->
+                complete_task(Parent, Ref, true, Result, NewTasks);
+
+            {defer, NewTasks} ->
+                defer_task(Parent, Ref, NewTasks);
+
+            {error, Reason} ->
+                complete_task(Parent, Ref, false, Reason)
+        end
+    catch
+        _:Err ?BIND_STACKTRACE(Stack) ->
+            ?GET_STACKTRACE(Stack),
+            complete_task( Parent
+                         , Ref
+                         , _success = false
+                         , {uncaught_exception, Err, Stack}
+                         )
+    end.

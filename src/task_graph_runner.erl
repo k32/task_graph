@@ -1,15 +1,22 @@
 -module(task_graph_runner).
 
--type ok_result() :: ok | unchanged.
+-type run_result() :: ok
+                    | {ok, Result :: term()}
+                    | {ok, Result :: term(), task_graph_lib:tasks()}
+                    | {defer, task_graph_lib:tasks()}
+                    | {error, Reason :: term()}
+                    .
 
 -callback run_task( task_graph_lib:task_id()
                   , Data :: term()
                   , GetDepResult :: fun((task_graph_lib:task_id()) -> {ok, term()} | error)
-                  ) ->
-          ok_result()
-        | {ok_result(), Result}
-        | {ok_result(), Result, task_graph_lib:tasks()}
-        | {defer, task_graph_lib:tasks()}
-        | {error, Reason}
-        when Result   :: term(),
-             Reason   :: term().
+                  ) -> run_result().
+
+-type guard_result() :: unchanged
+                      | {unchanged, Result :: term()}
+                      | changed
+                      .
+
+-callback guard( task_graph_lib:task_id()
+               , Data :: term()
+               ) -> guard_result().

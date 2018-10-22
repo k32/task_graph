@@ -5,7 +5,6 @@
 -include_lib("task_graph/include/task_graph.hrl").
 
 -ifdef(TEST).
--include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
@@ -26,7 +25,7 @@
         , add_tasks/2
         , expand/2
         , expand/3
-        , complete_task/3
+        , complete_task/4
         , add_dependencies/2
         , pre_schedule_tasks/2
         , print_graph/1
@@ -39,7 +38,7 @@
 
 -type task() :: #tg_task{}.
 
--type resource_id() :: term().
+-type resource_id() :: atom() | number() | reference() | list().
 
 -type maybe(A) :: {just, A} | undefined.
 
@@ -49,8 +48,9 @@
         { task_id :: task_id()
         , execute :: task_execute()
         , data :: term()
-        , rank = 0 :: non_neg_integer()         %% How many tasks depend on this one
-        , dependencies = 0 :: non_neg_integer() %% How many dependencies this task has
+        , rank = 0 :: non_neg_integer()           %% How many tasks depend on this one
+        , dependencies = 0 :: non_neg_integer()   %% How many dependencies this task has
+        , unchanged_deps = 0 :: non_neg_integer() %% How many dependencies haven't changed
         , complete = false :: boolean()
         , resources :: [resource_id()]
         }).
@@ -71,6 +71,7 @@
                , _data = '_'
                , _rank = '_'
                , _dependencies = 0
+               , _unchanged_deps = '_'
                , _complete = false
                , _resources = '_'
                }).
@@ -132,7 +133,7 @@ delete_graph(#task_graph{vertices = V, edges = E, resources = R}) ->
                       {ok, task_graph()}
                     | {error, duplicate_task}.
 add_tasks(G, Tasks) ->
-    VV = [task_to_vertex(I) || I <- Tasks],
+    VV = [task_to_vertex(I, G) || I <- Tasks],
     try
       lists:foreach(
         fun(V) ->
@@ -190,7 +191,9 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
                           %% Increase rank of the parent task
                           ets:update_counter(VV, From, {#vertex.rank, 1}),
                           %% Increase the number of dependencies
-                          ets:update_counter(VV, To, {#vertex.dependencies, 1});
+                          ets:update_counter(VV, To, [ {#vertex.dependencies, 1}
+                                                     , {#vertex.unchanged_deps, 1}
+                                                     ]);
                       true ->
                           %% Avoid double-increasing counters and
                           %% ignore dependencies that are already
@@ -276,24 +279,28 @@ check_cycles(Edges, Visited, Vertex) ->
 
 -spec pre_schedule_tasks( task_graph()
                         , map_sets:set(task_id())
-                        ) -> {ok, [task()]}.
+                        ) -> {ok, [ { task()
+                                    , DepsChanged :: boolean()
+                                    }]}.
 pre_schedule_tasks(Graph, ExcludedTasks) ->
     #task_graph{vertices = VV, resources = RR} = Graph,
     Matches = [{ -Rank
-               , #tg_task{ task_id = Ref
-                         , execute = Mod
-                         , data = Data
-                         }
+               , { #tg_task{ task_id = Ref
+                           , execute = Mod
+                           , data = Data
+                           }
+                 , UnchangedDeps == 0
+                 }
                }
                || #vertex{ task_id = Ref
                          , execute = Mod
                          , data = Data
                          , rank = Rank
+                         , unchanged_deps = UnchangedDeps
                          , resources = Resources
                          } <- ets:match_object(VV, ?READY_TO_GO),
                   not map_sets:is_element(Ref, ExcludedTasks),
-                  %% Note: the below check actually has side effect,
-                  %% it allocates resources:
+                  %% Note: the below check actually has side effect
                   maybe_alloc_resources(RR, Resources)
               ],
     {ok, [T || {_, T} <- lists:keysort(1, Matches)]}.
@@ -303,7 +310,9 @@ pre_schedule_tasks(Graph, ExcludedTasks) ->
                      ) -> ok.
 alloc_resources(RT, RR) ->
     lists:foreach( fun(I) ->
-                           ets:update_counter(RT, I, {#resource.quantity, -1})
+                           Res = ets:update_counter(RT, I, {#resource.quantity, -1}),
+                           %% Assert:
+                           true = Res >= 0
                    end
                  , RR).
 
@@ -336,12 +345,12 @@ is_complete(#task_graph{vertices=VV}, Ref) ->
             false
     end.
 
--spec complete_task(task_graph(), task_id(), term()) -> ok.
+-spec complete_task(task_graph(), task_id(), boolean(), term()) -> ok.
 complete_task(#task_graph{ vertices = VV
                          , edges = EE
                          , results = RR
                          , resources = RSR
-                         }, Ref, Result) ->
+                         }, Ref, Changed, Result) ->
     %% Mark task complete
     [Old] = ets:lookup(VV, Ref),
     ets:insert(VV, Old#vertex{complete = true}),
@@ -358,22 +367,38 @@ complete_task(#task_graph{ vertices = VV
         [] ->
             ok;
         [{Ref, Deps}] ->
-            [ets:update_counter(VV, I, {#vertex.dependencies, -1})
+            UpOp = if Changed ->
+                           {#vertex.dependencies, -1};
+                      true ->
+                           [ {#vertex.dependencies, -1}
+                           , {#vertex.unchanged_deps, -1}
+                           ]
+                   end,
+            [ets:update_counter(VV, I, UpOp)
              || I <- map_sets:to_list(Deps)]
     end,
     %% Free resources:
     lists:foreach( fun(I) ->
                            ets:update_counter(RSR, I, {#resource.quantity, 1})
                    end
-                 , Old#vertex.resources),
+                 , Old#vertex.resources
+                 ),
     ok.
 
--spec task_to_vertex(task()) -> #vertex{}.
-task_to_vertex(#tg_task{task_id = Ref, execute = E, data = D, resources = R}) ->
+-spec task_to_vertex(task(), #task_graph{}) -> #vertex{}.
+task_to_vertex( #tg_task{ task_id = Ref
+                        , execute = E
+                        , data = D
+                        , resources = R
+                        }
+              , #task_graph{resources = RT}
+              ) ->
     #vertex{ task_id = Ref
            , execute = E
            , data = D
-           , resources = lists:usort(R)
+           , resources = lists:filter( fun(I) -> ets:member(RT, I) end
+                                     , lists:usort(R)
+                                     )
            }.
 
 -spec vertex_to_task(#vertex{}) -> task().
@@ -401,32 +426,35 @@ get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
                            , [resource_id()]
                            ) -> boolean().
 maybe_alloc_resources(RR, Resources) ->
-    lists:all( fun(I) ->
-                       case ets:lookup(RR, I) of
-                           [] ->
-                               true;
-                           [#resource{quantity = V}] ->
-                               Ret = V > 0,
-                               if Ret ->
-                                       alloc_resources(RR, Resources);
-                                  true ->
-                                       ok
-                               end,
-                               Ret
-                       end
-               end
-             , Resources).
+    Ret = lists:all( fun(I) ->
+                             case ets:lookup(RR, I) of
+                                 [] ->
+                                     true;
+                                 [#resource{quantity = V}] ->
+                                     V > 0
+                             end
+                     end
+                   , Resources),
+    if Ret ->
+            alloc_resources(RR, Resources);
+       true ->
+            ok
+    end,
+    Ret.
 
 -ifdef(TEST).
+
+-define(MATCH_TASK(ID),  {#tg_task{task_id=ID}, _}).
+
 search_tasks_test() ->
     G = new_graph(foo),
     {ok, _} = add_tasks(G, [ #tg_task{task_id = 0}
                            , #tg_task{task_id = 1}
                            , #tg_task{task_id = 2}
                            ]),
-    ?assertEqual( [ #tg_task{task_id=0}
-                  , #tg_task{task_id=1}
-                  , #tg_task{task_id=2}
+    ?assertMatch( [ ?MATCH_TASK(0)
+                  , ?MATCH_TASK(1)
+                  , ?MATCH_TASK(2)
                   ]
                 , lists:sort(element( 2
                                     , pre_schedule_tasks(G, #{})
@@ -436,18 +464,18 @@ search_tasks_test() ->
                                   , {0, 2}
                                   , {1, 2}
                                   ]),
-    ?assertEqual( {ok, [#tg_task{task_id=0}]}
+    ?assertMatch( {ok, [?MATCH_TASK(0)]}
                 , pre_schedule_tasks(G, #{})
                 ),
-    ?assertEqual( {ok, []}
+    ?assertMatch( {ok, []}
                 , pre_schedule_tasks(G, map_sets:from_list([0]))
                 ),
-    ok = complete_task(G, 0, undefined),
-    ?assertEqual( {ok, [#tg_task{task_id=1}]}
+    ok = complete_task(G, 0, true, undefined),
+    ?assertMatch( {ok, [?MATCH_TASK(1)]}
                 , pre_schedule_tasks(G, #{})
                 ),
-    ok = complete_task(G, 1, undefined),
-    ?assertEqual( {ok, [#tg_task{task_id=2}]}
+    ok = complete_task(G, 1, true, undefined),
+    ?assertMatch( {ok, [?MATCH_TASK(2)]}
                 , pre_schedule_tasks(G, #{})
                 ).
 -endif.

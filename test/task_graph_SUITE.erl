@@ -14,8 +14,8 @@
         , t_topology/1
         , t_error_handling/1
         , t_resources/1
-        , t_defer/1
-        %% , t_resources_nodeps/1 %% FIXME: Unstable
+        , t_deferred/1
+        , t_guards/1
         ]).
 
 %% gen_event callbacks:
@@ -36,7 +36,7 @@
 -include_lib("task_graph/include/task_graph.hrl").
 -include("task_graph_test.hrl").
 
--define(TIMEOUT, 600).
+-define(TIMEOUT, 1200).
 -define(NUMTESTS, 1000).
 -define(SIZE, 1000).
 
@@ -73,84 +73,36 @@ topology_succ() ->
                 Opts = #{event_handlers => [send_back()]},
                 {ok, _} = task_graph:run_graph(foo, Opts, DAG),
                 Events = collect_events(),
-                %% Check that tasks are executed after their dependencies:
-                {Tasks, RanTimes} = lists:foldl( fun check_topology/2
-                                               , {#{}, #{}}
-                                               , Events
-                                               ),
-                %% Check that all tasks have been executed once:
-                lists:foreach( fun(Key) ->
-                                       %% Assert:
-                                       1 = maps:get(Key, RanTimes)
-                               end
-                             , maps:keys(Tasks)
-                             ),
-                true
+                Tasks = collect_all_tasks(DAG),
+                check_topology(Tasks, Events)
             end).
 
-t_defer(_Config) ->
+%% Test that all dynamic tasks are executed in a correct order
+t_deferred(_Config) ->
     ?RUN_PROP(deferred, 100),
     ok.
 
 deferred() ->
-    ?FORALL(DAG, dag(inject_deferred()),
+    ?FORALL(DAG0, dag(inject_deferred()),
             begin
+                {Vertices0, Edges} = DAG0,
+                Vertices = lists:map( fun(T = #tg_task{ task_id = Id
+                                                      , data = {deferred, Data}
+                                                      }) ->
+                                              T#tg_task{data = {deferred, tag_ids(Id, Data)}
+                                                       };
+                                         (T) ->
+                                              T
+                                      end
+                                    , Vertices0
+                                    ),
+                DAG = {Vertices, Edges},
                 Opts = #{event_handlers => [send_back()]},
                 {ok, _} = task_graph:run_graph(foo, Opts, DAG),
                 Events = collect_events(),
-                %% Check that tasks are executed after their dependencies:
-                _ = lists:foldl( fun check_topology/2
-                               , {#{}, #{}}
-                               , Events
-                               ),
-                true
+                Tasks = collect_all_tasks(DAG),
+                check_topology(Tasks, Events)
             end).
-
-check_topology(#tg_event{kind = Kind, data = Evt}, {Tasks, RanTimes}) ->
-    case Kind of
-        add_tasks ->
-            NewTasks = lists:foldl( fun(Tid, Acc) ->
-                                            Id = fun(A) -> A end,
-                                            maps:update_with( Tid
-                                                            , Id
-                                                            , map_sets:new()
-                                                            , Acc
-                                                            )
-                                    end
-                                  , Tasks
-                                  , [Tid || #tg_task{task_id = Tid} <- Evt]
-                                  ),
-            {NewTasks, RanTimes};
-        add_dependencies ->
-            NewTasks = lists:foldl( fun({From, To}, Acc) ->
-                                            AddDeps =
-                                                fun(Old) when is_map(Old) ->
-                                                        map_sets:add_element(From, Old)
-                                                end,
-                                            maps:update_with( To
-                                                            , AddDeps
-                                                            , Acc
-                                                            )
-                                    end
-                                  , Tasks
-                                  , Evt
-                                  ),
-            {NewTasks, RanTimes};
-        spawn_task ->
-            #{Evt := Deps} = Tasks,
-            %% Assert:
-            lists:foreach( fun(DepId) ->
-                                   1 = maps:get(DepId, RanTimes)
-                           end
-                         , map_sets:to_list(Deps)
-                         ),
-            {Tasks, RanTimes};
-        complete_task ->
-            RanTimes2 = inc_counters([Evt], RanTimes),
-            {Tasks, RanTimes2};
-        _ ->
-            {Tasks, RanTimes}
-    end.
 
 %% Test that cyclic dependencies can be detected
 t_topology(_Config) ->
@@ -217,98 +169,32 @@ resources() ->
     ?FORALL(
        {NResources, Capacity, DAG0},
        ?LET(NResources, range(1, MaxNumberOfResorces),
-            {NResources, range(1, MaxCapacity), dag(list(range(1, NResources)))}),
+            { NResources
+            , range(1, MaxCapacity)
+            , dag(list(range(1, NResources * 2)))
+            }),
        begin
            ResourceIds = lists:seq(1, NResources),
            Limits = maps:from_list([{I, Capacity} || I <- ResourceIds]),
            {Vertices0, Edges} = DAG0,
            Vertices =
-               [T0#tg_task{ resources = RR
-                          , data = #{}
+               [T0#tg_task{ data = #{}
+                          , resources = RR
                           }
                 || T0 = #tg_task{data = RR} <- Vertices0],
            DAG = {Vertices, Edges},
-           Opts = #{ resources => Limits
-                   , event_handlers => [send_back()]
+           Opts = #{ event_handlers => [send_back()]
+                   , resources => Limits
                    },
            {ok, _} = task_graph:run_graph(foo, Opts, DAG),
            Events = collect_events(),
-           lists:foldl(check_resource_usage(false), {#{}, Limits, 0}, Events),
+           Tasks = collect_all_tasks(DAG),
+           lists:foldl( check_resource_usage(Tasks, Limits)
+                      , Limits
+                      , Events
+                      ),
            true
        end).
-
-%% Check that resource constraints are respected (no dependencies)
-t_resources_nodeps(_Config) ->
-    ?RUN_PROP(resources_nodeps),
-    ok.
-
-resources_nodeps() ->
-    MaxCapacity = 20,
-    MaxNumberOfResorces = 10,
-    ?FORALL(
-       {NResources, Capacity, TasksData},
-       ?LET(NResources, range(1, MaxNumberOfResorces),
-            {NResources, range(1, MaxCapacity), list(list(range(1, NResources)))}),
-       begin
-           ResourceIds = lists:seq(1, NResources),
-           Limits = maps:from_list([{I, Capacity} || I <- ResourceIds]),
-           Vertices =
-               [#tg_task{ task_id = Id
-                        , resources = RR
-                        , data = #{}
-                        , execute = test_worker
-                        }
-                || {Id, RR} <- lists:zip( lists:seq(1, length(TasksData))
-                                        , TasksData
-                                        )],
-           DAG = {Vertices, []},
-           Opts = #{ resources => Limits
-                   , event_handlers => [send_back()]
-                   },
-           {ok, _} = task_graph:run_graph(foo, Opts, DAG),
-           Events = collect_events(),
-           io:format("Evts: ~p", [Events]),
-           lists:foldl(check_resource_usage(Capacity), {#{}, Limits, 0}, Events),
-           true
-       end).
-
-check_resource_usage(Capacity) ->
-    fun(#tg_event{kind = Kind, data = EvtData}, {Tasks, Resources, N}) ->
-            case Kind of
-                add_tasks ->
-                    NewTasks = maps:from_list([{Id, lists:usort(Res)}
-                                               || #tg_task{ task_id = Id
-                                                          , resources = Res
-                                                          } <- EvtData
-                                              ]),
-                    {maps:merge(Tasks, NewTasks), Resources, N};
-                spawn_task ->
-                    #{EvtData := RR} = Tasks,
-                    Resources2 = dec_counters(RR, Resources),
-                    %% Check that resource capacities are always respected
-                    %% Assert:
-                    lists:all( fun(V) -> V >= 0 end
-                             , maps:values(Resources2)
-                             ) orelse error(Resources2),
-                    %% Check that resources are fully utilized:
-                    NumTasks = maps:size(Tasks),
-                    if is_integer(Capacity), N > Capacity, N < NumTasks - Capacity - 1 ->
-                            %% Assert:
-                            true = lists:any( fun(V) -> V == 0 end
-                                            , maps:values(Resources2)
-                                            ) orelse error({Resources2, N, NumTasks});
-                       true ->
-                            true
-                    end,
-                    {Tasks, Resources2, N+1};
-                complete_task ->
-                    #{EvtData := RR} = Tasks,
-                    Resources2 = inc_counters(RR, Resources),
-                    {Tasks, Resources2, N};
-                _ ->
-                    {Tasks, Resources, N}
-            end
-    end.
 
 %% Check that task spawn events are reported, collected and processed
 %% to nice graphs
@@ -371,13 +257,34 @@ t_evt_build_flow(_Config) ->
                     ),
     ok.
 
+t_guards(_Config) ->
+    ?RUN_PROP(guards),
+    ok.
+
+guards() ->
+    ?FORALL(DAG, dag({guard, boolean()}),
+            begin
+                Opts = #{event_handlers => [send_back()]},
+                {ok, _} = task_graph:run_graph(foo, Opts, DAG),
+                Events = collect_events(),
+                Tasks = collect_all_tasks(DAG),
+                Executed = lists:sort([Id || #tg_event{kind = spawn_task, data = Id} <- Events]),
+                Expected = lists:sort([Id || Id <- maps:keys(Tasks),
+                                             is_task_changed(Id, Tasks)
+                                      ]),
+                Expected == Executed orelse error({ 'Expected:', Expected
+                                                  , ', got:', Executed
+                                                  }),
+                true
+            end).
+
 %%%===================================================================
 %%% Proper generators
 %%%===================================================================
 
 %% Proper generator of directed acyclic graphs:
 dag() ->
-    dag(undefined).
+    dag(default).
 %% ...supply custom data to tasks (`Payload' is a proper generator)
 dag(Payload) ->
     dag(Payload, 2, 4).
@@ -411,13 +318,101 @@ inject_errors() ->
               ]).
 
 inject_deferred() ->
-    frequency([ {5, ok}
+    frequency([ {2, ok}
               , {1, {deferred, dag()}}
               ]).
 
 %%%===================================================================
 %%% Utility functions:
 %%%===================================================================
+
+collect_all_tasks(DAG) ->
+    collect_all_tasks(DAG, #{}).
+
+collect_all_tasks({Vertices, Edges}, Acc0) ->
+    Acc1 = maps:merge( Acc0
+                     , maps:from_list([{Task#tg_task.task_id, {Task, #{}}}
+                                       || Task <- Vertices
+                                      ])
+                     ),
+    Acc2 = lists:foldl( fun({From, To}, Acc) ->
+                                AddDeps =
+                                    fun({T, Old}) when is_map(Old) ->
+                                            {T, map_sets:add_element(From, Old)}
+                                    end,
+                                maps:update_with(To, AddDeps, Acc)
+                        end
+                      , Acc1
+                      , Edges
+                      ),
+    Deferred = [DAG || #tg_task{data = {deferred, DAG}} <- Vertices],
+    lists:foldl( fun collect_all_tasks/2
+               , Acc2
+               , Deferred
+               ).
+
+check_resource_usage(Tasks, Limits) ->
+    fun(#tg_event{kind = Kind, data = EvtData}, Resources) ->
+            case Kind of
+                spawn_task ->
+                    #{EvtData := {Task, _Deps}} = Tasks,
+                    RR = lists:usort(Task#tg_task.resources),
+                    Resources2 = dec_counters(RR, Resources),
+                    %% Check that resource capacities are always respected
+                    %% Assert:
+                    lists:all( fun(V) -> V >= 0 end
+                             , [V || {K, V} <- maps:to_list(Resources2)
+                                             , maps:is_key(K, Limits)
+                               ]
+                             ) orelse error({ 'All resources should be >= 0:'
+                                            , Resources2
+                                            }),
+                    Resources2;
+                complete_task ->
+                    #{EvtData := {Task, _Deps}} = Tasks,
+                    RR = lists:usort(Task#tg_task.resources),
+                    Resources2 = inc_counters(RR, Resources),
+                    Resources2;
+                _ ->
+                    Resources
+            end
+    end.
+
+check_topology(Tasks, Events) ->
+    {Tasks, RanTimes} = lists:foldl( fun check_topology_/2
+                                   , {Tasks, #{}}
+                                   , Events
+                                   ),
+    %% Check that all tasks have been executed exactly once:
+    lists:foreach( fun(Key) ->
+                           Val = maps:get(Key, RanTimes),
+                           1 == Val orelse error({'Task', Key, 'ran', Val, 'times instead of 1'})
+                   end
+                 , maps:keys(Tasks)
+                 ),
+    true.
+check_topology_(#tg_event{kind = Kind, data = Evt}, {Tasks, RanTimes}) ->
+    case Kind of
+        spawn_task ->
+            #{Evt := {_, Deps}} = Tasks,
+            %% Assert:
+            lists:foreach( fun(DepId) ->
+                                   Val = maps:get(DepId, RanTimes, undefined),
+                                   Val == 1 orelse
+                                       error({ DepId, ', dependency of'
+                                             , Evt, 'ran'
+                                             , Val, 'times instead of 1'
+                                             })
+                           end
+                         , map_sets:to_list(Deps)
+                         ),
+            {Tasks, RanTimes};
+        complete_task ->
+            RanTimes2 = inc_counters([Evt], RanTimes),
+            {Tasks, RanTimes2};
+        _ ->
+            {Tasks, RanTimes}
+    end.
 
 expected_errors(DAG) ->
     {Vertices, _} = DAG,
@@ -453,6 +448,21 @@ dec_counters(Keys, Map) ->
                , Map
                , Keys
                ).
+
+tag_ids(Tag, {Vertices, Edges}) ->
+    { [T#tg_task{ task_id = {Tag, T#tg_task.task_id}} || T <- Vertices]
+    , [{{Tag, A}, {Tag, B}} || {A, B} <- Edges]
+    }.
+
+is_task_changed(Id, Tasks) ->
+    case maps:get(Id, Tasks) of
+        {#tg_task{data = {guard, true}}, Deps} ->
+            lists:any( fun(Dep) -> is_task_changed(Dep, Tasks) end
+                     , maps:keys(Deps)
+                     );
+        _ ->
+            true
+    end.
 
 %%%===================================================================
 %%% gen_event boilerplate
