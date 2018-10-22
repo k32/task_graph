@@ -1,7 +1,7 @@
 -module(test_worker).
 -behavior(task_graph_runner).
 
--export([run_task/3, guard/2]).
+-export([run_task/3, guard/3]).
 
 -include("task_graph_test.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -33,9 +33,9 @@ run_task(Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
 run_task(Ref, _, _) ->
     ok.
 
-guard(Ref, {guard, true}) ->
+guard(Ref, {guard, true}, _GetDepResult) ->
     {unchanged, {result, Ref}};
-guard(_Ref, _Data) ->
+guard(_Ref, _Data, _GetDepResult) ->
     changed.
 
 check_dep_results(_Self, GetDepsResult, Deps) ->

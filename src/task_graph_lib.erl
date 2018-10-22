@@ -50,7 +50,7 @@
         , data :: term()
         , rank = 0 :: non_neg_integer()           %% How many tasks depend on this one
         , dependencies = 0 :: non_neg_integer()   %% How many dependencies this task has
-        , unchanged_deps = 0 :: non_neg_integer() %% How many dependencies haven't changed
+        , changed_deps = 0 :: non_neg_integer()   %% How many dependencies have changed
         , complete = false :: boolean()
         , resources :: [resource_id()]
         }).
@@ -71,7 +71,7 @@
                , _data = '_'
                , _rank = '_'
                , _dependencies = 0
-               , _unchanged_deps = '_'
+               , _changed_deps = '_'
                , _complete = false
                , _resources = '_'
                }).
@@ -192,7 +192,7 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
                           ets:update_counter(VV, From, {#vertex.rank, 1}),
                           %% Increase the number of dependencies
                           ets:update_counter(VV, To, [ {#vertex.dependencies, 1}
-                                                     , {#vertex.unchanged_deps, 1}
+                                                     , {#vertex.changed_deps, 1}
                                                      ]);
                       true ->
                           %% Avoid double-increasing counters and
@@ -289,14 +289,14 @@ pre_schedule_tasks(Graph, ExcludedTasks) ->
                            , execute = Mod
                            , data = Data
                            }
-                 , UnchangedDeps == 0
+                 , ChangedDeps == 0
                  }
                }
                || #vertex{ task_id = Ref
                          , execute = Mod
                          , data = Data
                          , rank = Rank
-                         , unchanged_deps = UnchangedDeps
+                         , changed_deps = ChangedDeps
                          , resources = Resources
                          } <- ets:match_object(VV, ?READY_TO_GO),
                   not map_sets:is_element(Ref, ExcludedTasks),
@@ -371,11 +371,12 @@ complete_task(#task_graph{ vertices = VV
                            {#vertex.dependencies, -1};
                       true ->
                            [ {#vertex.dependencies, -1}
-                           , {#vertex.unchanged_deps, -1}
+                           , {#vertex.changed_deps, -1}
                            ]
                    end,
             [ets:update_counter(VV, I, UpOp)
-             || I <- map_sets:to_list(Deps)]
+             || I <- map_sets:to_list(Deps)
+            ]
     end,
     %% Free resources:
     lists:foreach( fun(I) ->

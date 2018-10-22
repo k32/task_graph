@@ -1,5 +1,13 @@
 -module(task_graph_runner).
 
+-export_type([ get_deps_result/0
+             , run_result/0
+             , guard_result/0
+             ]).
+
+-type get_deps_result() ::
+        fun((task_graph_lib:task_id()) -> {ok, term()} | error).
+
 -type run_result() :: ok
                     | {ok, Result :: term()}
                     | {ok, Result :: term(), task_graph_lib:tasks()}
@@ -9,7 +17,7 @@
 
 -callback run_task( task_graph_lib:task_id()
                   , Data :: term()
-                  , GetDepResult :: fun((task_graph_lib:task_id()) -> {ok, term()} | error)
+                  , GetDepResult :: get_deps_result()
                   ) -> run_result().
 
 -type guard_result() :: unchanged
@@ -19,4 +27,5 @@
 
 -callback guard( task_graph_lib:task_id()
                , Data :: term()
+               , GetDepResult :: get_deps_result()
                ) -> guard_result().
