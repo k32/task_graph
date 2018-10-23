@@ -1,6 +1,6 @@
 %%% This is free and unencumbered software released into the public
 %%% domain.
--module(task_graph_lib).
+-module(task_graph_digraph).
 
 -include_lib("task_graph/include/task_graph.hrl").
 
@@ -8,14 +8,9 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--export_type([ task/0
-             , tasks/0
-             , task_id/0
-             , resource_id/0
-             , task_execute/0
-             , task_graph/0
-             , maybe/1
+-export_type([ digraph/0
              ]).
+
 
 -export([ new_graph/1
         , new_graph/2
@@ -32,36 +27,24 @@
         , get_task_result/2
         ]).
 
--type task_execute() :: atom() | task_runner:run().
-
--type task_id() :: term().
-
--type task() :: #tg_task{}.
-
--type resource_id() :: atom() | number() | reference() | list().
-
--type maybe(A) :: {just, A} | undefined.
-
--type tasks() :: {[task()], [{task_id(), task_id()}]}.
-
 -record(vertex,
-        { task_id :: task_id()
-        , execute :: task_execute()
+        { task_id :: task_graph:task_id()
+        , execute :: task_graph:task_execute()
         , data :: term()
         , rank = 0 :: non_neg_integer()           %% How many tasks depend on this one
         , dependencies = 0 :: non_neg_integer()   %% How many dependencies this task has
         , changed_deps = 0 :: non_neg_integer()   %% How many dependencies have changed
         , complete = false :: boolean()
-        , resources :: [resource_id()]
+        , resources :: [task_graph:resource_id()]
         }).
 
 -record(result,
-        { task_id :: task_id()
+        { task_id :: task_graph:task_id()
         , result  :: term()
         }).
 
 -record(resource,
-        { resource_id :: resource_id()
+        { resource_id :: task_graph:resource_id()
         , quantity    :: non_neg_integer()
         }).
 
@@ -85,16 +68,16 @@
 
 %% -type edge() :: {task_id(), map_sets:set(task_id())}.
 
--opaque task_graph() :: #task_graph{}.
+-opaque digraph() :: #task_graph{}.
 
 
--spec new_graph(atom()) -> task_graph().
+-spec new_graph(atom()) -> digraph().
 new_graph(Name) ->
     new_graph(Name, #{}).
 
 -spec new_graph( atom()
-               , #{resource_id() => non_neg_integer()}
-               ) -> task_graph().
+               , #{task_graph:resource_id() => non_neg_integer()}
+               ) -> digraph().
 new_graph(_Name, Resources) ->
     RR = ets:new(tg_resources,
                  [ set
@@ -122,14 +105,14 @@ new_graph(_Name, Resources) ->
                , resources = RR
                }.
 
--spec delete_graph(task_graph()) -> ok.
+-spec delete_graph(digraph()) -> ok.
 delete_graph(#task_graph{vertices = V, edges = E, resources = R}) ->
     ets:delete(V),
     ets:delete(E),
     ets:delete(R),
     ok.
 
--spec add_tasks(task_graph(), [task()]) ->
+-spec add_tasks(digraph(), [task_graph:task()]) ->
                       ok
                     | {error, duplicate_task}.
 add_tasks(G, Tasks) ->
@@ -159,10 +142,10 @@ add_tasks(G, Tasks) ->
     end.
 
 %% Note: leaves graph in inconsistent state upon error!
--spec add_dependencies(task_graph(), [{task_id(), task_id()}]) ->
+-spec add_dependencies(digraph(), [{task_graph:task_id(), task_graph:task_id()}]) ->
                               ok
                             | {error, circular_dependencies}
-                            | {error, missing_vertex, task_id()}.
+                            | {error, missing_vertex, task_graph:task_id()}.
 add_dependencies(#task_graph{edges = EE, vertices = VV}, Deps) ->
     try
         %% Add edges
@@ -212,11 +195,14 @@ add_dependencies(#task_graph{edges = EE, vertices = VV}, Deps) ->
             {error, missing_vertex, Id}
     end.
 
--spec expand(task_graph(), tasks()) -> ok | {error, term()}.
+-spec expand(digraph(), task_graph:digraph()) -> ok | {error, term()}.
 expand(G, Tasks) ->
     expand(G, Tasks, undefined).
 
--spec expand(task_graph(), tasks(), maybe(task_id())) -> ok | {error, term()}.
+-spec expand( digraph()
+            , task_graph:digraph()
+            , task_graph:maybe(task_graph:task_id())
+            ) -> ok | {error, term()}.
 expand(G, {Vertices, Edges} = Tasks, Parent) ->
     case check_new_tasks(Tasks, Parent) of
         true ->
@@ -232,8 +218,8 @@ expand(G, {Vertices, Edges} = Tasks, Parent) ->
 
 %% Dynamically added tasks should not introduce new dependencies for
 %% any of existing pending tasks.
--spec check_new_tasks( tasks()
-                     , {just, task_id()} | undefined
+-spec check_new_tasks( task_graph:digraph()
+                     , task_graph:maybe(task_graph:task_id())
                      ) -> boolean().
 check_new_tasks({Vertices, Edges}, ParentTask) ->
     L0 = [Ref || #tg_task{id = Ref} <- Vertices],
@@ -248,7 +234,7 @@ check_new_tasks({Vertices, Edges}, ParentTask) ->
     %% Disregard the new tasks:
     map_sets:size(map_sets:subtract(Deps, New)) == 0.
 
--spec is_empty_graph(task_graph()) -> boolean().
+-spec is_empty_graph(digraph()) -> boolean().
 is_empty_graph(G) ->
     case ets:first(G#task_graph.vertices) of
         '$end_of_table' ->
@@ -276,11 +262,12 @@ check_cycles(Edges, Visited, Vertex) ->
                          , Children)
     end.
 
--spec pre_schedule_tasks( task_graph()
-                        , map_sets:set(task_id())
-                        ) -> {ok, [ { task()
+-spec pre_schedule_tasks( digraph()
+                        , map_sets:set(task_graph:task_id())
+                        ) -> {ok, [ { task_graph:task()
                                     , DepsChanged :: boolean()
-                                    }]}.
+                                    }
+                                  ]}.
 pre_schedule_tasks(Graph, ExcludedTasks) ->
     #task_graph{vertices = VV, resources = RR} = Graph,
     Matches = [{ -Rank
@@ -305,7 +292,7 @@ pre_schedule_tasks(Graph, ExcludedTasks) ->
     {ok, [T || {_, T} <- lists:keysort(1, Matches)]}.
 
 -spec alloc_resources( ets:tid()
-                     , [resource_id()]
+                     , [task_graph:resource_id()]
                      ) -> ok.
 alloc_resources(RT, RR) ->
     lists:foreach( fun(I) ->
@@ -315,7 +302,7 @@ alloc_resources(RT, RR) ->
                    end
                  , RR).
 
--spec print_graph(task_graph()) -> iolist().
+-spec print_graph(digraph()) -> iolist().
 print_graph(#task_graph{vertices = VV, edges = EE}) ->
     Vertices = [[I, I, R, D] || #vertex{ task_id = I
                                        , rank = R
@@ -335,7 +322,7 @@ print_graph(#task_graph{vertices = VV, edges = EE}) ->
     , "}\n"
     ].
 
--spec is_complete(task_graph(), task_id()) -> boolean().
+-spec is_complete(digraph(), task_graph:task_id()) -> boolean().
 is_complete(#task_graph{vertices=VV}, Ref) ->
     case ets:lookup(VV, Ref) of
         [#vertex{complete=Complete}] ->
@@ -344,7 +331,11 @@ is_complete(#task_graph{vertices=VV}, Ref) ->
             false
     end.
 
--spec complete_task(task_graph(), task_id(), boolean(), term()) -> ok.
+-spec complete_task( digraph()
+                   , task_graph:task_id()
+                   , boolean()
+                   , term()
+                   ) -> ok.
 complete_task(#task_graph{ vertices = VV
                          , edges = EE
                          , results = RR
@@ -385,7 +376,7 @@ complete_task(#task_graph{ vertices = VV
                  ),
     ok.
 
--spec task_to_vertex(task(), #task_graph{}) -> #vertex{}.
+-spec task_to_vertex(task_graph:task(), digraph()) -> #vertex{}.
 task_to_vertex( #tg_task{ id = Ref
                         , execute = E
                         , data = D
@@ -401,14 +392,14 @@ task_to_vertex( #tg_task{ id = Ref
                                      )
            }.
 
--spec vertex_to_task(#vertex{}) -> task().
+-spec vertex_to_task(#vertex{}) -> task_graph:task().
 vertex_to_task(#vertex{task_id = Ref, execute = E, data = D}) ->
     #tg_task{ id = Ref
             , execute = E
             , data = D
             }.
 
--spec get_task_result(task_graph(), task_id()) -> {ok, term()} | error.
+-spec get_task_result(digraph(), task_graph:task_id()) -> {ok, term()} | error.
 get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
     case ets:lookup(VV, Ref) of
         [_] ->
@@ -423,7 +414,7 @@ get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
     end.
 
 -spec maybe_alloc_resources( ets:tid()
-                           , [resource_id()]
+                           , [task_graph:resource_id()]
                            ) -> boolean().
 maybe_alloc_resources(RR, Resources) ->
     Ret = lists:all( fun(I) ->
