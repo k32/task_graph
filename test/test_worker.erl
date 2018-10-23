@@ -14,7 +14,7 @@ run_task(Ref, exception, _GetDepsResult) ->
 run_task(Ref, #{deps := Deps}, GetDepsResult) ->
     check_dep_results(Ref, GetDepsResult, Deps),
     {ok, {result, Ref}};
-run_task(Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
+run_task(_Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
     case Vertices of
         [#tg_task{id = T0}|_] ->
             case GetDepsResult(T0) of
@@ -30,7 +30,7 @@ run_task(Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
         _ ->
             ok
     end;
-run_task(Ref, _, _) ->
+run_task(_Ref, _, _) ->
     ok.
 
 guard(Ref, {guard, true}, _GetDepResult) ->

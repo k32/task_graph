@@ -16,6 +16,7 @@
         , t_resources/1
         , t_deferred/1
         , t_guards/1
+        , t_no_guards/1
         ]).
 
 %% gen_event callbacks:
@@ -277,6 +278,23 @@ guards() ->
                                                   }),
                 true
             end).
+
+%% Test that `disable_guards' flag forces running all jobs:
+t_no_guards(_Config) ->
+    DAG = { [#tg_task{ id = 0
+                     , execute = test_worker
+                     , data = {guard, true}
+                     }]
+          , []
+          },
+    Opts = #{ event_handlers => [send_back()]
+            , disable_guards => true
+            },
+    {ok, _} = task_graph:run_graph(foo, Opts, DAG),
+    Events = collect_events(),
+    %% Assert:
+    [ok] = [ok || #tg_event{kind = spawn_task, data = 0} <- Events],
+    ok.
 
 %%%===================================================================
 %%% Proper generators

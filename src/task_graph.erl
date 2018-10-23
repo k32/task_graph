@@ -24,6 +24,7 @@
 -type settings_key() :: event_manager
                       | event_handlers
                       | resources
+                      | disable_guards
                       .
 
 -record(worker_pool,
@@ -39,6 +40,7 @@
         , workers                          :: #{task_graph_lib:task_execute() =>
                                                     #worker_pool{}}
         , parent                           :: pid()
+        , guards                           :: boolean()
         }).
 
 %%%===================================================================
@@ -107,14 +109,15 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
     ResourceLimits = maps:get(resources, Settings, #{}),
     Graph = task_graph_lib:new_graph(TaskName, ResourceLimits),
     try
-        {ok, Graph1} = push_tasks(Tasks, Graph, EventMgr, undefined),
+        ok = push_tasks(Tasks, Graph, EventMgr, undefined),
         %% io:format(user, "~s~n", [task_graph_lib:print_graph(Graph2)]),
         maybe_pop_tasks(),
-        {ok, #state{ graph = Graph1
+        {ok, #state{ graph = Graph
                    , workers = #{}
                    , event_mgr = EventMgr
                    %% , result = #{}
                    , parent = Parent
+                   , guards = not maps:get(disable_guards, Settings, false)
                    }}
     catch
         _:{badmatch,{error, circular_dependencies, Cycle}} ->
@@ -135,7 +138,7 @@ handle_cast({complete_task, Ref, _Success = true, Changed, Return, NewTasks}, St
     ok = task_graph_lib:complete_task(G, Ref, Changed, Return),
     State1 =
         case push_tasks(NewTasks, State#state{graph = G}, undefined) of
-            {ok, G2} ->
+            ok ->
                 State#state{ current_tasks =
                                  maps:remove(Ref, State#state.current_tasks)
                            };
@@ -151,9 +154,8 @@ handle_cast({defer_task, Ref, NewTasks}, State) ->
     event(defer_task, Ref, State),
     State1 =
         case push_tasks(NewTasks, State, {just, Ref}) of
-            {ok, G1} ->
+            ok ->
                 State#state{ current_tasks = map_sets:del_element(Ref, Curr)
-                           , graph = G1
                            };
             Err ->
                 push_error(Ref, Err, State)
@@ -212,18 +214,18 @@ code_change(_OldVsn, State, _Extra) ->
 -spec push_tasks( task_graph_lib:tasks()
                 , #state{}
                 , task_graph_lib:maybe(task_graph_lib:task_id())
-                ) -> {ok, task_graph_lib:task_graph()}
+                ) -> ok
                    | {error, term()}.
-push_tasks(NewTasks, #state{graph = G0, event_mgr = EventMgr}, Parent) ->
-    push_tasks(NewTasks, G0, EventMgr, Parent).
+push_tasks(NewTasks, #state{graph = G, event_mgr = EventMgr}, Parent) ->
+    push_tasks(NewTasks, G, EventMgr, Parent).
 
-push_tasks({[], []}, G, _, _) ->
-    {ok, G};
-push_tasks(NewTasks = {Vertices, Edges}, G0, EventMgr, Parent) ->
+push_tasks({[], []}, _Graph, _, _) ->
+    ok;
+push_tasks(NewTasks = {Vertices, Edges}, G, EventMgr, Parent) ->
     event(extend_begin, EventMgr),
     event(add_tasks, Vertices, EventMgr),
     event(add_dependencies, Edges, EventMgr),
-    Ret = task_graph_lib:expand(G0, NewTasks, Parent),
+    Ret = task_graph_lib:expand(G, NewTasks, Parent),
     event(extend_end, EventMgr),
     Ret.
 
@@ -291,11 +293,16 @@ defer_task(Parent, Ref, NewTasks) ->
 run_task( {Task = #tg_task{id = Ref}, DepsUnchanged}
         , State = #state{ current_tasks = TT
                         , graph = G
+                        , guards = Guards
                         }) ->
     GetDepResult = fun(Ref1) ->
                            task_graph_lib:get_task_result(G, Ref1)
                    end,
-    Pid = spawn_task(Task, State#state.event_mgr, GetDepResult, DepsUnchanged),
+    Pid = spawn_task( Task
+                    , State#state.event_mgr
+                    , GetDepResult
+                    , DepsUnchanged andalso Guards
+                    ),
     State#state{current_tasks = TT#{Ref => Pid}}.
 
 -spec spawn_task( task_graph_lib:task()
@@ -366,9 +373,9 @@ spawn_task( Task = #tg_task{ id = Ref
 do_run_guard( Parent
             , EventMgr
             , GuardFun
-            , Task = #tg_task{ id = Ref
-                             , data = Data
-                             }
+            , #tg_task{ id = Ref
+                      , data = Data
+                      }
             , GetDepResult
             ) ->
     event(run_guard, Ref, EventMgr),
@@ -394,9 +401,9 @@ do_run_guard( Parent
 do_run_task( Parent
            , EventMgr
            , RunTaskFun
-           , Task = #tg_task{ id = Ref
-                            , data = Data
-                            }
+           , #tg_task{ id = Ref
+                     , data = Data
+                     }
            , GetDepResult
            ) ->
     event(spawn_task, Ref, EventMgr),

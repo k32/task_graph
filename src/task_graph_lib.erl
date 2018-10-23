@@ -130,7 +130,7 @@ delete_graph(#task_graph{vertices = V, edges = E, resources = R}) ->
     ok.
 
 -spec add_tasks(task_graph(), [task()]) ->
-                      {ok, task_graph()}
+                      ok
                     | {error, duplicate_task}.
 add_tasks(G, Tasks) ->
     VV = [task_to_vertex(I, G) || I <- Tasks],
@@ -152,8 +152,7 @@ add_tasks(G, Tasks) ->
                    ok
            end
         end,
-        VV),
-      {ok, G}
+        VV)
     catch
         duplicate_task ->
             {error, duplicate_task}
@@ -161,10 +160,10 @@ add_tasks(G, Tasks) ->
 
 %% Note: leaves graph in inconsistent state upon error!
 -spec add_dependencies(task_graph(), [{task_id(), task_id()}]) ->
-                              {ok, task_graph()}
+                              ok
                             | {error, circular_dependencies}
                             | {error, missing_vertex, task_id()}.
-add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
+add_dependencies(#task_graph{edges = EE, vertices = VV}, Deps) ->
     try
         %% Add edges
         lists:foreach(
@@ -205,7 +204,7 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
                   check_cycles(EE, map_sets:new(), From)
           end,
           Deps),
-        {ok, G}
+        ok
     catch
         {circular_dependencies, Cycle} ->
             {error, circular_dependencies, Cycle};
@@ -213,17 +212,17 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
             {error, missing_vertex, Id}
     end.
 
--spec expand(task_graph(), tasks()) -> {ok, task_graph()} | {error, term()}.
+-spec expand(task_graph(), tasks()) -> ok | {error, term()}.
 expand(G, Tasks) ->
     expand(G, Tasks, undefined).
 
--spec expand(task_graph(), tasks(), maybe(task_id())) -> {ok, task_graph()} | {error, term()}.
+-spec expand(task_graph(), tasks(), maybe(task_id())) -> ok | {error, term()}.
 expand(G, {Vertices, Edges} = Tasks, Parent) ->
     case check_new_tasks(Tasks, Parent) of
         true ->
             case add_tasks(G, Vertices) of
-                {ok, G1} ->
-                    add_dependencies(G1, Edges);
+                ok ->
+                    add_dependencies(G, Edges);
                 Err ->
                     Err
             end;
@@ -449,10 +448,10 @@ maybe_alloc_resources(RR, Resources) ->
 
 search_tasks_test() ->
     G = new_graph(foo),
-    {ok, _} = add_tasks(G, [ #tg_task{id = 0}
-                           , #tg_task{id = 1}
-                           , #tg_task{id = 2}
-                           ]),
+    ok = add_tasks(G, [ #tg_task{id = 0}
+                      , #tg_task{id = 1}
+                      , #tg_task{id = 2}
+                      ]),
     ?assertMatch( [ ?MATCH_TASK(0)
                   , ?MATCH_TASK(1)
                   , ?MATCH_TASK(2)
@@ -461,10 +460,10 @@ search_tasks_test() ->
                                     , pre_schedule_tasks(G, #{})
                                     ))
                 ),
-    {ok, _} = add_dependencies(G, [ {0, 1}
-                                  , {0, 2}
-                                  , {1, 2}
-                                  ]),
+    ok = add_dependencies(G, [ {0, 1}
+                             , {0, 2}
+                             , {1, 2}
+                             ]),
     ?assertMatch( {ok, [?MATCH_TASK(0)]}
                 , pre_schedule_tasks(G, #{})
                 ),
