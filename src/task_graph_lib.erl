@@ -237,7 +237,7 @@ expand(G, {Vertices, Edges} = Tasks, Parent) ->
                      , {just, task_id()} | undefined
                      ) -> boolean().
 check_new_tasks({Vertices, Edges}, ParentTask) ->
-    L0 = [Ref || #tg_task{task_id = Ref} <- Vertices],
+    L0 = [Ref || #tg_task{id = Ref} <- Vertices],
     New = case ParentTask of
               {just, PT} ->
                   map_sets:from_list([PT|L0]);
@@ -285,7 +285,7 @@ check_cycles(Edges, Visited, Vertex) ->
 pre_schedule_tasks(Graph, ExcludedTasks) ->
     #task_graph{vertices = VV, resources = RR} = Graph,
     Matches = [{ -Rank
-               , { #tg_task{ task_id = Ref
+               , { #tg_task{ id = Ref
                            , execute = Mod
                            , data = Data
                            }
@@ -387,7 +387,7 @@ complete_task(#task_graph{ vertices = VV
     ok.
 
 -spec task_to_vertex(task(), #task_graph{}) -> #vertex{}.
-task_to_vertex( #tg_task{ task_id = Ref
+task_to_vertex( #tg_task{ id = Ref
                         , execute = E
                         , data = D
                         , resources = R
@@ -404,7 +404,7 @@ task_to_vertex( #tg_task{ task_id = Ref
 
 -spec vertex_to_task(#vertex{}) -> task().
 vertex_to_task(#vertex{task_id = Ref, execute = E, data = D}) ->
-    #tg_task{ task_id = Ref
+    #tg_task{ id = Ref
             , execute = E
             , data = D
             }.
@@ -445,13 +445,13 @@ maybe_alloc_resources(RR, Resources) ->
 
 -ifdef(TEST).
 
--define(MATCH_TASK(ID),  {#tg_task{task_id=ID}, _}).
+-define(MATCH_TASK(ID),  {#tg_task{id=ID}, _}).
 
 search_tasks_test() ->
     G = new_graph(foo),
-    {ok, _} = add_tasks(G, [ #tg_task{task_id = 0}
-                           , #tg_task{task_id = 1}
-                           , #tg_task{task_id = 2}
+    {ok, _} = add_tasks(G, [ #tg_task{id = 0}
+                           , #tg_task{id = 1}
+                           , #tg_task{id = 2}
                            ]),
     ?assertMatch( [ ?MATCH_TASK(0)
                   , ?MATCH_TASK(1)

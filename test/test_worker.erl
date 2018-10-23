@@ -16,7 +16,7 @@ run_task(Ref, #{deps := Deps}, GetDepsResult) ->
     {ok, {result, Ref}};
 run_task(Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
     case Vertices of
-        [#tg_task{task_id = T0}|_] ->
+        [#tg_task{id = T0}|_] ->
             case GetDepsResult(T0) of
                 error ->
                     %% We haven't been executed yet...
