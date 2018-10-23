@@ -57,7 +57,7 @@ Basic usage:
 
 main() ->
     %% Define tasks:
-    Tasks = [#task{ task_id = I
+    Tasks = [#task{ id = I
                   , execute = fun(MyId, MyData) ->
                                   io:format("I'm ~p, doing ~p~n", [MyId, MyData])
                               end,
@@ -93,7 +93,7 @@ How to emulate =make -j N= flag using =resources=:
 
 #+BEGIN_SRC erlang
 %% Define tasks:
-Tasks = [#task{ task_id = I
+Tasks = [#task{ id = I
               , execute = fun(MyId, MyData) ->
                               io:format("I'm ~p, doing ~p~n", [MyId, MyData])
                           end,
