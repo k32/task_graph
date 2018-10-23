@@ -86,7 +86,7 @@ deferred() ->
     ?FORALL(DAG0, dag(inject_deferred()),
             begin
                 {Vertices0, Edges} = DAG0,
-                Vertices = lists:map( fun(T = #tg_task{ task_id = Id
+                Vertices = lists:map( fun(T = #tg_task{ id = Id
                                                       , data = {deferred, Data}
                                                       }) ->
                                               T#tg_task{data = {deferred, tag_ids(Id, Data)}
@@ -129,7 +129,7 @@ topology() ->
                              ),
                 Acyclic = digraph_utils:is_acyclic(DG),
                 digraph:delete(DG),
-                Vertices2 = [#tg_task{ task_id = I
+                Vertices2 = [#tg_task{ id = I
                                      , execute = test_worker
                                      , data = #{deps => []}
                                      } || I <- Vertices],
@@ -200,7 +200,7 @@ resources() ->
 %% to nice graphs
 t_evt_draw_deps(_Config) ->
     Filename = "test.dot",
-    DynamicTask = #tg_task{ task_id = dynamic
+    DynamicTask = #tg_task{ id = dynamic
                           , execute = fun(_,_,_) -> {ok, {}} end
                           },
     Exec = fun(1, _, _) ->
@@ -213,8 +213,8 @@ t_evt_draw_deps(_Config) ->
                                           , style    => fun(_) -> "color=green shape=oval" end
                                           , preamble => "preamble"
                                           }}]},
-    Tasks = [ #tg_task{task_id="foo", execute=Exec}
-            , #tg_task{task_id=1, execute=Exec}
+    Tasks = [ #tg_task{id="foo", execute=Exec}
+            , #tg_task{id=1, execute=Exec}
             ],
     Deps = [{"foo", 1}],
     {ok, _} = task_graph:run_graph(foo, Opts, {Tasks, Deps}),
@@ -235,7 +235,7 @@ t_evt_build_flow(_Config) ->
     Opts = #{event_handlers =>
                  [{task_graph_flow, #{ filename => Filename
                                      }}]},
-    Tasks = [#tg_task{ task_id = I
+    Tasks = [#tg_task{ id = I
                      , execute = fun(_,_,_) -> {ok, {}} end
                      , data = #{}
                      }
@@ -303,7 +303,7 @@ dag(Payload, X, Y) ->
               Data = lists:sublist( lists:append([tuple_to_list(I) || I <- Data0])
                                   , length(Vertices)
                                   ),
-              Tasks = [#tg_task{ task_id = I
+              Tasks = [#tg_task{ id = I
                                , data = P
                                , execute = test_worker
                                }
@@ -331,7 +331,7 @@ collect_all_tasks(DAG) ->
 
 collect_all_tasks({Vertices, Edges}, Acc0) ->
     Acc1 = maps:merge( Acc0
-                     , maps:from_list([{Task#tg_task.task_id, {Task, #{}}}
+                     , maps:from_list([{Task#tg_task.id, {Task, #{}}}
                                        || Task <- Vertices
                                       ])
                      ),
@@ -416,7 +416,7 @@ check_topology_(#tg_event{kind = Kind, data = Evt}, {Tasks, RanTimes}) ->
 
 expected_errors(DAG) ->
     {Vertices, _} = DAG,
-    [Id || #tg_task{task_id = Id, data = D} <- Vertices,
+    [Id || #tg_task{id = Id, data = D} <- Vertices,
            D =:= error orelse D =:= exception].
 
 send_back() ->
@@ -450,7 +450,7 @@ dec_counters(Keys, Map) ->
                ).
 
 tag_ids(Tag, {Vertices, Edges}) ->
-    { [T#tg_task{ task_id = {Tag, T#tg_task.task_id}} || T <- Vertices]
+    { [T#tg_task{ id = {Tag, T#tg_task.id}} || T <- Vertices]
     , [{{Tag, A}, {Tag, B}} || {A, B} <- Edges]
     }.
 

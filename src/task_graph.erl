@@ -21,8 +21,10 @@
                    | pid()
                    | undefined.
 
--type settings_key() :: jobs
-                      | event_handlers.
+-type settings_key() :: event_manager
+                      | event_handlers
+                      | resources
+                      .
 
 -record(worker_pool,
         { workers :: #{pid() => worker_state()}
@@ -58,12 +60,17 @@ run_graph(TaskName, Tasks) ->
                , task_manager_lib:tasks()
                ) -> {ok, term()} | {error, term()}.
 run_graph(TaskName, Settings, Tasks) ->
-    {ok, EventMgr} = gen_event:start_link(),
-    lists:foreach( fun({Handler, Args}) ->
-                           gen_event:add_handler(EventMgr, Handler, Args)
-                   end
-                 , maps:get(event_handlers, Settings, [])
-                 ),
+    case maps:get(event_manager, Settings, undefined) of
+        EventMgr when is_pid(EventMgr) ->
+            ok;
+        undefined ->
+            {ok, EventMgr} = gen_event:start_link(),
+            lists:foreach( fun({Handler, Args}) ->
+                                   gen_event:add_handler(EventMgr, Handler, Args)
+                           end
+                         , maps:get(event_handlers, Settings, [])
+                         )
+    end,
     Ret = gen_server:start( {local, TaskName}
                           , ?MODULE
                           , {TaskName, EventMgr, Settings, Tasks, self()}
@@ -281,7 +288,7 @@ defer_task(Parent, Ref, NewTasks) ->
     gen_server:cast(Parent, {defer_task, Ref, NewTasks}).
 
 -spec run_task({task_graph_lib:task(), boolean()}, #state{}) -> #state{}.
-run_task( {Task = #tg_task{task_id = Ref}, DepsUnchanged}
+run_task( {Task = #tg_task{id = Ref}, DepsUnchanged}
         , State = #state{ current_tasks = TT
                         , graph = G
                         }) ->
@@ -296,7 +303,7 @@ run_task( {Task = #tg_task{task_id = Ref}, DepsUnchanged}
                 , fun((task_graph_lib:task_id()) -> {ok, term()} | error)
                 , boolean()
                 ) -> pid().
-spawn_task( Task = #tg_task{ task_id = Ref
+spawn_task( Task = #tg_task{ id = Ref
                            , execute = Exec
                            }
           , EventMgr
@@ -359,7 +366,7 @@ spawn_task( Task = #tg_task{ task_id = Ref
 do_run_guard( Parent
             , EventMgr
             , GuardFun
-            , Task = #tg_task{ task_id = Ref
+            , Task = #tg_task{ id = Ref
                              , data = Data
                              }
             , GetDepResult
@@ -387,7 +394,7 @@ do_run_guard( Parent
 do_run_task( Parent
            , EventMgr
            , RunTaskFun
-           , Task = #tg_task{ task_id = Ref
+           , Task = #tg_task{ id = Ref
                             , data = Data
                             }
            , GetDepResult
