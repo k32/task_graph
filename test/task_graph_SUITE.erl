@@ -279,7 +279,7 @@ guards() ->
                 true
             end).
 
-%% Test that `disable_gaurds' flag forces running all jobs:
+%% Test that `disable_guards' flag forces running all jobs:
 t_no_guards(_Config) ->
     DAG = { [#tg_task{ id = 0
                      , execute = test_worker
