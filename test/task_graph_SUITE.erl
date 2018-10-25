@@ -403,8 +403,8 @@ check_topology(Tasks, Events) ->
                                    ),
     %% Check that all tasks have been executed exactly once:
     lists:foreach( fun(Key) ->
-                           Val = maps:get(Key, RanTimes),
-                           1 == Val orelse error({'Task', Key, 'ran', Val, 'times instead of 1'})
+                           Val = maps:get(Key, RanTimes, 0),
+                           1 == Val orelse error({'Task', Key, 'ran', Val, 'times instead of 1', Events})
                    end
                  , maps:keys(Tasks)
                  ),

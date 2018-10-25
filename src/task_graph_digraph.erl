@@ -60,10 +60,11 @@
                }).
 
 -record(task_graph,
-        { vertices   :: ets:tid() %% #vertex{}
-        , edges      :: ets:tid() %% {From :: task_id(), To :: set(task_id())}
-        , results    :: ets:tid() %% #result{}
-        , resources  :: ets:tid() %% #resource{}
+        { vertices      :: ets:tid() %% #vertex{}
+        , done_vertices :: ets:tid() %% #vertex{}
+        , edges         :: ets:tid() %% {From :: task_id(), To :: set(task_id())}
+        , results       :: ets:tid() %% #result{}
+        , resources     :: ets:tid() %% #resource{}
         }).
 
 %% -type edge() :: {task_id(), map_sets:set(task_id())}.
@@ -90,27 +91,33 @@ new_graph(_Name, Resources) ->
               end
             , Resources
             ),
-    #task_graph{ vertices  = ets:new(tg_vertices,
-                                     [ set
-                                     , {keypos, #vertex.task_id}
-                                     ])
-               , edges     = ets:new(tg_edges,
-                                     [ set
-                                     , {keypos, 1}
-                                     ])
-               , results   = ets:new(tg_results,
-                                     [ set
-                                     , {keypos, #result.task_id}
-                                     ])
-               , resources = RR
+    #task_graph{ vertices      = ets:new(tg_vertices,
+                                         [ set
+                                         , {keypos, #vertex.task_id}
+                                         ])
+               , done_vertices = ets:new(tg_vertices,
+                                         [ set
+                                         , {keypos, #vertex.task_id}
+                                         ])
+               , edges         = ets:new(tg_edges,
+                                         [ set
+                                         , {keypos, 1}
+                                         ])
+               , results       = ets:new(tg_results,
+                                         [ set
+                                         , {keypos, #result.task_id}
+                                         ])
+               , resources     = RR
                }.
 
 -spec delete_graph(digraph()) -> ok.
-delete_graph(#task_graph{vertices = V, edges = E, resources = R}) ->
-    ets:delete(V),
-    ets:delete(E),
-    ets:delete(R),
-    ok.
+delete_graph(#task_graph{ vertices = VV
+                        , done_vertices = VD
+                        , results = RR
+                        , edges = E
+                        , resources = R
+                        }) ->
+    lists:foreach(fun ets:delete/1, [VV, VD, RR, E, R]).
 
 -spec add_tasks(digraph(), [task_graph:task()]) ->
                       ok
@@ -123,7 +130,7 @@ add_tasks(G, Tasks) ->
            case ets:insert_new(G#task_graph.vertices, V) of
                false ->
                    %% Compare old and new task definitions
-                   [OldV] = ets:lookup(G#task_graph.vertices, V#vertex.task_id),
+                   [OldV] = lookup_vertex(G, V#vertex.task_id),
                    case vertex_to_task(OldV) =:= vertex_to_task(V) of
                        true ->
                            %% New definition is the same, I'll allow it
@@ -146,19 +153,19 @@ add_tasks(G, Tasks) ->
                               ok
                             | {error, circular_dependencies}
                             | {error, missing_vertex, task_graph:task_id()}.
-add_dependencies(#task_graph{edges = EE, vertices = VV}, Deps) ->
+add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
     try
         %% Add edges
         lists:foreach(
           fun({From, To}) ->
                   Complete =
-                      case ets:lookup(VV, From) of
+                      case lookup_vertex(G, From) of
                           [] ->
                               throw({missing_vertex, From});
                           [#vertex{complete = C}] ->
                               C
                       end,
-                  case ets:lookup(VV, To) of
+                  case lookup_vertex(G, To) of
                       [] ->
                           throw({missing_vertex, To});
                       _ ->
@@ -171,7 +178,7 @@ add_dependencies(#task_graph{edges = EE, vertices = VV}, Deps) ->
                   case map_sets:is_element(To, OldDeps) orelse Complete of
                       false ->
                           %% Increase rank of the parent task
-                          ets:update_counter(VV, From, {#vertex.rank, 1}),
+                          %% ets:update_counter(VV, From, {#vertex.rank, 1}), FIXME ranks
                           %% Increase the number of dependencies
                           ets:update_counter(VV, To, [ {#vertex.dependencies, 1}
                                                      , {#vertex.changed_deps, 1}
@@ -269,27 +276,20 @@ check_cycles(Edges, Visited, Vertex) ->
                                     }
                                   ]}.
 pre_schedule_tasks(Graph, ExcludedTasks) ->
-    #task_graph{vertices = VV, resources = RR} = Graph,
+    #task_graph{vertices = VV, done_vertices = VD, resources = RR} = Graph,
     Matches = [{ -Rank
-               , { #tg_task{ id = Ref
-                           , execute = Mod
-                           , data = Data
-                           }
-                 , ChangedDeps == 0
-                 }
+               , {V, ChangedDeps == 0}
                }
-               || #vertex{ task_id = Ref
-                         , execute = Mod
-                         , data = Data
-                         , rank = Rank
-                         , changed_deps = ChangedDeps
-                         , resources = Resources
-                         } <- ets:match_object(VV, ?READY_TO_GO),
+               || V = #vertex{ task_id = Ref
+                             , rank = Rank
+                             , changed_deps = ChangedDeps
+                             , resources = Resources
+                             } <- ets:match_object(VV, ?READY_TO_GO),
                   not map_sets:is_element(Ref, ExcludedTasks),
                   %% Note: the below check actually has side effect
                   maybe_alloc_resources(RR, Resources)
               ],
-    {ok, [T || {_, T} <- lists:keysort(1, Matches)]}.
+    {ok, [{vertex_to_task(Vtx), Changed} || {_, {Vtx, Changed}} <- lists:keysort(1, Matches)]}.
 
 -spec alloc_resources( ets:tid()
                      , [task_graph:resource_id()]
@@ -323,8 +323,8 @@ print_graph(#task_graph{vertices = VV, edges = EE}) ->
     ].
 
 -spec is_complete(digraph(), task_graph:task_id()) -> boolean().
-is_complete(#task_graph{vertices=VV}, Ref) ->
-    case ets:lookup(VV, Ref) of
+is_complete(#task_graph{done_vertices=VD}, Ref) ->
+    case ets:lookup(VD, Ref) of
         [#vertex{complete=Complete}] ->
             Complete;
         [] ->
@@ -337,13 +337,14 @@ is_complete(#task_graph{vertices=VV}, Ref) ->
                    , term()
                    ) -> ok.
 complete_task(#task_graph{ vertices = VV
+                         , done_vertices = VD
                          , edges = EE
                          , results = RR
                          , resources = RSR
                          }, Ref, Changed, Result) ->
     %% Mark task complete
-    [Old] = ets:lookup(VV, Ref),
-    ets:insert(VV, Old#vertex{complete = true}),
+    [Old] = ets:take(VV, Ref),
+    ets:insert(VD, Old#vertex{complete = true}),
     case Result of
         undefined ->
             ok;
@@ -400,8 +401,8 @@ vertex_to_task(#vertex{task_id = Ref, execute = E, data = D}) ->
             }.
 
 -spec get_task_result(digraph(), task_graph:task_id()) -> {ok, term()} | error.
-get_task_result(#task_graph{vertices = VV, results = RR}, Ref) ->
-    case ets:lookup(VV, Ref) of
+get_task_result(G = #task_graph{results = RR}, Ref) ->
+    case lookup_vertex(G, Ref) of
         [_] ->
             {ok, case ets:match(RR, #result{task_id = Ref, result = '$1'}) of
                      [[Val]] ->
@@ -432,6 +433,15 @@ maybe_alloc_resources(RR, Resources) ->
             ok
     end,
     Ret.
+
+-spec lookup_vertex(digraph(), task_graph:task_id()) -> [#vertex{}].
+lookup_vertex(#task_graph{vertices = VV, done_vertices = VD}, Id) ->
+    case ets:lookup(VV, Id) of
+        [] ->
+            ets:lookup(VD, Id);
+        A ->
+            A
+    end.
 
 -ifdef(TEST).
 
