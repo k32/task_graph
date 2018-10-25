@@ -3,6 +3,7 @@
 -module(task_graph_digraph).
 
 -include_lib("task_graph/include/task_graph.hrl").
+-include_lib("stdlib/include/ms_transform.hrl").
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -36,6 +37,7 @@
         , changed_deps = 0 :: non_neg_integer()   %% How many dependencies have changed
         , complete = false :: boolean()
         , resources :: [task_graph:resource_id()]
+        , rmask     :: non_neg_integer()
         }).
 
 -record(result,
@@ -46,18 +48,8 @@
 -record(resource,
         { resource_id :: task_graph:resource_id()
         , quantity    :: non_neg_integer()
+        , bitpos      :: non_neg_integer()
         }).
-
--define(READY_TO_GO,
-        {vertex, _task_id = '$1'
-               , _execute = '_'
-               , _data = '_'
-               , _rank = '_'
-               , _dependencies = 0
-               , _changed_deps = '_'
-               , _complete = false
-               , _resources = '_'
-               }).
 
 -record(task_graph,
         { vertices      :: ets:tid() %% #vertex{}
@@ -71,6 +63,15 @@
 
 -opaque digraph() :: #task_graph{}.
 
+-spec ready_to_go(non_neg_integer()) -> ets:match_spec().
+ready_to_go(Mask) ->
+    ets:fun2ms(fun(V = #vertex{ dependencies = 0
+                              , complete = false
+                              , rmask = M
+                              }
+                  ) when M band Mask == 0 ->
+                       V
+               end).
 
 -spec new_graph(atom()) -> digraph().
 new_graph(Name) ->
@@ -84,13 +85,16 @@ new_graph(_Name, Resources) ->
                  [ set
                  , {keypos, #resource.resource_id}
                  ]),
-    maps:map( fun(K, V) when is_integer(V), V > 0 ->
-                      ets:insert(RR, #resource{ resource_id = K
-                                              , quantity    = V
-                                              })
-              end
-            , Resources
-            ),
+    maps:fold( fun(K, V, N) when is_integer(V), V > 0 ->
+                       ets:insert(RR, #resource{ resource_id = K
+                                               , quantity    = V
+                                               , bitpos      = N
+                                               }),
+                       N + 1
+               end
+             , 0
+             , Resources
+             ),
     #task_graph{ vertices      = ets:new(tg_vertices,
                                          [ set
                                          , {keypos, #vertex.task_id}
@@ -178,7 +182,7 @@ add_dependencies(G = #task_graph{edges = EE, vertices = VV}, Deps) ->
                   case map_sets:is_element(To, OldDeps) orelse Complete of
                       false ->
                           %% Increase rank of the parent task
-                          %% ets:update_counter(VV, From, {#vertex.rank, 1}), FIXME ranks
+                          ets:update_counter(VV, From, {#vertex.rank, 1}),
                           %% Increase the number of dependencies
                           ets:update_counter(VV, To, [ {#vertex.dependencies, 1}
                                                      , {#vertex.changed_deps, 1}
@@ -277,6 +281,7 @@ check_cycles(Edges, Visited, Vertex) ->
                                   ]}.
 pre_schedule_tasks(Graph, ExcludedTasks) ->
     #task_graph{vertices = VV, done_vertices = VD, resources = RR} = Graph,
+    RMask = make_resource_bitmask(RR),
     Matches = [{ -Rank
                , {V, ChangedDeps == 0}
                }
@@ -284,7 +289,7 @@ pre_schedule_tasks(Graph, ExcludedTasks) ->
                              , rank = Rank
                              , changed_deps = ChangedDeps
                              , resources = Resources
-                             } <- ets:match_object(VV, ?READY_TO_GO),
+                             } <- ets:select(VV, ready_to_go(RMask)),
                   not map_sets:is_element(Ref, ExcludedTasks),
                   %% Note: the below check actually has side effect
                   maybe_alloc_resources(RR, Resources)
@@ -385,12 +390,25 @@ task_to_vertex( #tg_task{ id = Ref
                         }
               , #task_graph{resources = RT}
               ) ->
+    RMask = lists:foldl( fun(Key, Acc) ->
+                                 case ets:lookup(RT, Key) of
+                                     [#resource{bitpos = P}] ->
+                                         Acc + 1 bsl P;
+                                     [] ->
+                                         Acc
+                                 end
+                         end
+                       , 0
+                       , lists:usort(R)
+                       ),
+    Resources = lists:filter( fun(I) -> ets:member(RT, I) end
+                            , lists:usort(R)
+                            ),
     #vertex{ task_id = Ref
            , execute = E
            , data = D
-           , resources = lists:filter( fun(I) -> ets:member(RT, I) end
-                                     , lists:usort(R)
-                                     )
+           , resources = Resources
+           , rmask = RMask
            }.
 
 -spec vertex_to_task(#vertex{}) -> task_graph:task().
@@ -443,6 +461,17 @@ lookup_vertex(#task_graph{vertices = VV, done_vertices = VD}, Id) ->
             A
     end.
 
+-spec make_resource_bitmask(ets:tid()) -> non_neg_integer().
+make_resource_bitmask(ResourcesTab) ->
+    ets:foldl( fun(#resource{bitpos = P, quantity = 0}, Acc) ->
+                       Acc + 1 bsl P;
+                  (#resource{}, Acc) ->
+                       Acc
+               end
+             , 0
+             , ResourcesTab
+             ).
+
 -ifdef(TEST).
 
 -define(MATCH_TASK(ID),  {#tg_task{id=ID}, _}).
@@ -479,4 +508,5 @@ search_tasks_test() ->
     ?assertMatch( {ok, [?MATCH_TASK(2)]}
                 , pre_schedule_tasks(G, #{})
                 ).
+
 -endif.
