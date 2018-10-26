@@ -35,7 +35,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("proper/include/proper.hrl").
--include_lib("task_graph/include/task_graph.hrl").
+-include_lib("task_graph/src/task_graph_int.hrl").
 -include("task_graph_test.hrl").
 
 -define(TIMEOUT, 1200).
@@ -51,7 +51,8 @@
             %% Workaround against CT's "wonderful" features:
             OldGL = group_leader(),
             group_leader(whereis(user), self()),
-            io:format(??PROP),
+            T0 = erlang:system_time(?tg_timeUnit),
+            io:format(user, ??PROP, []),
             catch ets:delete(?SHEDULE_STATS_TABLE),
             ets:new(?SHEDULE_STATS_TABLE, [named_table]),
             catch ets:delete(?EXPAND_STATS_TABLE),
@@ -63,6 +64,8 @@
                                       ),
             group_leader(OldGL, self()),
             analyse_statistics(),
+            T1 = erlang:system_time(?tg_timeUnit),
+            io:format(user, "Testcase ran for ~p ms~n", [T1 - T0]),
             true = Result
         end).
 

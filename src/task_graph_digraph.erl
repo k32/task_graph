@@ -9,8 +9,8 @@
 -endif.
 
 -export_type([ digraph/0
+             , candidate/0
              ]).
-
 
 -export([ new_graph/1
         , new_graph/2
@@ -23,6 +23,7 @@
         , complete_task/4
         , add_dependencies/2
         , pre_schedule_tasks/2
+        , unlocked_tasks/1
         , print_graph/1
         , get_task_result/2
         ]).
@@ -52,11 +53,11 @@
         {vertex, _task_id = '$1'
                , _execute = '_'
                , _data = '_'
-               , _rank = '_'
+               , _rank = '$3'
                , _dependencies = 0
                , _changed_deps = '_'
                , _complete = false
-               , _resources = '_'
+               , _resources = '$2'
                }).
 
 -record(task_graph,
@@ -66,10 +67,12 @@
         , resources  :: ets:tid() %% #resource{}
         }).
 
-%% -type edge() :: {task_id(), map_sets:set(task_id())}.
+-type candidate() :: { ID        :: task_graph:task_id()
+                     , Resources :: [task_graph:resource_id()]
+                     , Rank      :: non_neg_integer()
+                     }.
 
 -opaque digraph() :: #task_graph{}.
-
 
 -spec new_graph(atom()) -> digraph().
 new_graph(Name) ->
@@ -263,33 +266,35 @@ check_cycles(Edges, Visited, Vertex) ->
     end.
 
 -spec pre_schedule_tasks( digraph()
-                        , map_sets:set(task_graph:task_id())
-                        ) -> {ok, [ { task_graph:task()
-                                    , DepsChanged :: boolean()
-                                    }
-                                  ]}.
-pre_schedule_tasks(Graph, ExcludedTasks) ->
+                        , [candidate()]
+                        ) -> { ok
+                             , [candidate()]
+                             , [{ task_graph:task()
+                                , DepsChanged :: boolean()
+                                }]
+                             }.
+pre_schedule_tasks(Graph, Candidates) ->
     #task_graph{vertices = VV, resources = RR} = Graph,
-    Matches = [{ -Rank
-               , { #tg_task{ id = Ref
-                           , execute = Mod
-                           , data = Data
-                           }
-                 , ChangedDeps == 0
-                 }
-               }
-               || #vertex{ task_id = Ref
-                         , execute = Mod
-                         , data = Data
-                         , rank = Rank
-                         , changed_deps = ChangedDeps
-                         , resources = Resources
-                         } <- ets:match_object(VV, ?READY_TO_GO),
-                  not map_sets:is_element(Ref, ExcludedTasks),
-                  %% Note: the below check actually has side effect
-                  maybe_alloc_resources(RR, Resources)
-              ],
-    {ok, [T || {_, T} <- lists:keysort(1, Matches)]}.
+    Sorted = lists:keysort(3, Candidates),
+    {NewCandidates, Allocated} =
+        lists:foldl( fun(C = {Id, Resources, _}, {CC, AA}) ->
+                             case maybe_alloc_resources(RR, Resources) of
+                                 true ->
+                                     [V] = ets:lookup(VV, Id),
+                                     A = {vertex_to_task(V), V#vertex.changed_deps == 0},
+                                     {CC, [A|AA]};
+                                 false ->
+                                     {[C|CC], AA}
+                             end
+                     end
+                   , {[], []}
+                   , Sorted
+                   ),
+    {ok, NewCandidates, Allocated}.
+
+-spec unlocked_tasks(digraph()) -> [candidate()].
+unlocked_tasks(#task_graph{vertices = VV}) ->
+    lists:map(fun list_to_tuple/1, ets:match(VV, ?READY_TO_GO)).
 
 -spec alloc_resources( ets:tid()
                      , [task_graph:resource_id()]
@@ -335,7 +340,7 @@ is_complete(#task_graph{vertices=VV}, Ref) ->
                    , task_graph:task_id()
                    , boolean()
                    , term()
-                   ) -> ok.
+                   ) -> {ok, [task_graph:task_id()]}.
 complete_task(#task_graph{ vertices = VV
                          , edges = EE
                          , results = RR
@@ -353,28 +358,39 @@ complete_task(#task_graph{ vertices = VV
                                   })
     end,
     %% Remove it from the dependencies
-    case ets:take(EE, Ref) of
-        [] ->
-            ok;
-        [{Ref, Deps}] ->
-            UpOp = if Changed ->
-                           {#vertex.dependencies, -1};
-                      true ->
-                           [ {#vertex.dependencies, -1}
-                           , {#vertex.changed_deps, -1}
-                           ]
-                   end,
-            [ets:update_counter(VV, I, UpOp)
-             || I <- map_sets:to_list(Deps)
-            ]
-    end,
+    NewCounters =
+        case ets:take(EE, Ref) of
+            [] ->
+                [];
+            [{Ref, Deps}] ->
+                UpOp = if Changed ->
+                               [{#vertex.dependencies, -1}];
+                          true ->
+                               [ {#vertex.dependencies, -1}
+                               , {#vertex.changed_deps, -1}
+                               ]
+                       end,
+                [{I, ets:update_counter(VV, I, UpOp)}
+                 || I <- map_sets:to_list(Deps)
+                ]
+        end,
     %% Free resources:
     lists:foreach( fun(I) ->
                            ets:update_counter(RSR, I, {#resource.quantity, 1})
                    end
                  , Old#vertex.resources
                  ),
-    ok.
+    %% Return the list of tasks unlocked by this one:
+    Unlocked = [mk_candidate(VV, Id)
+                || {Id, [NDeps|_]} <- NewCounters
+                 , NDeps =:= 0
+               ],
+    {ok, Unlocked}.
+
+-spec mk_candidate(ets:tid(), task_graph:task_id()) -> candidate().
+mk_candidate(VV, Id) ->
+    [#vertex{rank = Rank, resources = Resources}] = ets:lookup(VV, Id),
+    {Id, Resources, Rank}.
 
 -spec task_to_vertex(task_graph:task(), digraph()) -> #vertex{}.
 task_to_vertex( #tg_task{ id = Ref
@@ -443,30 +459,34 @@ search_tasks_test() ->
                       , #tg_task{id = 1}
                       , #tg_task{id = 2}
                       ]),
-    ?assertMatch( [ ?MATCH_TASK(0)
-                  , ?MATCH_TASK(1)
-                  , ?MATCH_TASK(2)
-                  ]
-                , lists:sort(element( 2
-                                    , pre_schedule_tasks(G, #{})
-                                    ))
-                ),
+    %% ?assertMatch( [ ?MATCH_TASK(0)
+    %%               , ?MATCH_TASK(1)
+    %%               , ?MATCH_TASK(2)
+    %%               ]
+    %%             , lists:sort(element( 3
+    %%                                 , pre_schedule_tasks(G, [])
+    %%                                 ))
+    %%             ),
     ok = add_dependencies(G, [ {0, 1}
                              , {0, 2}
                              , {1, 2}
                              ]),
-    ?assertMatch( {ok, [?MATCH_TASK(0)]}
-                , pre_schedule_tasks(G, #{})
-                ),
-    ?assertMatch( {ok, []}
-                , pre_schedule_tasks(G, map_sets:from_list([0]))
-                ),
-    ok = complete_task(G, 0, true, undefined),
-    ?assertMatch( {ok, [?MATCH_TASK(1)]}
-                , pre_schedule_tasks(G, #{})
-                ),
-    ok = complete_task(G, 1, true, undefined),
-    ?assertMatch( {ok, [?MATCH_TASK(2)]}
-                , pre_schedule_tasks(G, #{})
-                ).
+    ?assertMatch([{0, _, 2}], unlocked_tasks(G)),
+    %% ?assertMatch( {ok, [], [?MATCH_TASK(0)]}
+    %%             , pre_schedule_tasks(G, #{})
+    %%             ),
+    %% ?assertMatch( {ok, [], []}
+    %%             , pre_schedule_tasks(G, map_sets:from_list([0]))
+    %%             ),
+    ?assertMatch({ok, [{1, _, 1}]}, complete_task(G, 0, true, undefined)),
+    ?assertMatch([{1, _, 1}], unlocked_tasks(G)),
+    %% ?assertMatch( {ok, [?MATCH_TASK(1)]}
+    %%             , pre_schedule_tasks(G, #{})
+    %%             ),
+    ?assertMatch({ok, [{2, _, 0}]}, complete_task(G, 1, true, undefined)),
+    ?assertMatch([{2, _, 0}], unlocked_tasks(G)),
+    %% ?assertMatch( {ok, [?MATCH_TASK(2)]}
+    %%             , pre_schedule_tasks(G, #{})
+    %%             ).
+    ok.
 -endif.

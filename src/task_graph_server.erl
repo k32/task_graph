@@ -15,6 +15,7 @@
 -record(state,
         { graph                            :: task_graph_digraph:digraph()
         , event_mgr                        :: event_mgr()
+        , candidates = []                  :: [task_graph_digraph:candidate()]
         , current_tasks = #{}              :: #{task_graph:task_id() => pid()}
         , failed_tasks = #{}               :: #{task_graph:task_id() => term()}
         , parent                           :: pid()
@@ -25,7 +26,8 @@
                    | {atom(), atom()}
                    | {global, term()}
                    | pid()
-                   | undefined.
+                   | undefined
+                   .
 
 %%%===================================================================
 %%% API
@@ -33,7 +35,6 @@
 
 %%--------------------------------------------------------------------
 %% @doc
-%% @end
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
                , #{task_graph:settings_key() => term()}
@@ -88,15 +89,15 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
     Graph = task_graph_digraph:new_graph(TaskName, ResourceLimits),
     try
         ok = push_tasks(Tasks, Graph, EventMgr, undefined),
-        %% io:format(user, "~s~n", [task_graph_digraph:print_graph(Graph2)]),
         maybe_pop_tasks(),
         {ok, #state{ graph = Graph
                    , event_mgr = EventMgr
                    , parent = Parent
                    , guards = not maps:get(disable_guards, Settings, false)
+                   , candidates = task_graph_digraph:unlocked_tasks(Graph)
                    }}
     catch
-        _:{badmatch,{error, circular_dependencies, Cycle}} ->
+        _:{badmatch, {error, circular_dependencies, Cycle}} ->
             {stop, {topology_error, Cycle}}
     end.
 
@@ -108,15 +109,25 @@ handle_cast({complete_task, Ref, _Success = false, _Changed, Return, _}, State) 
     maybe_pop_tasks(),
     {noreply, push_error(Ref, Return, State)};
 handle_cast({complete_task, Ref, _Success = true, Changed, Return, NewTasks}, State) ->
-    #state{ graph = G
+    #state{ candidates = OldCandidates
+          , graph = G
           } = State,
     event(complete_task, Ref, State),
-    ok = task_graph_digraph:complete_task(G, Ref, Changed, Return),
+    {ok, Unlocked} = task_graph_digraph:complete_task(G, Ref, Changed, Return),
     State1 =
         case push_tasks(NewTasks, State#state{graph = G}, undefined) of
             ok ->
+                Candidates =
+                    case NewTasks of
+                        {[], []} ->
+                            merge_candidates(Unlocked, OldCandidates);
+                        _ ->
+                            %% TODO: Perhaps it's not necessary to do a full search
+                            task_graph_digraph:unlocked_tasks(G)
+                    end,
                 State#state{ current_tasks =
                                  maps:remove(Ref, State#state.current_tasks)
+                           , candidates = Candidates
                            };
             Err ->
                 %% Dynamically added tasks are malformed or break the topology
@@ -126,12 +137,14 @@ handle_cast({complete_task, Ref, _Success = true, Changed, Return, NewTasks}, St
     {noreply, State1};
 handle_cast({defer_task, Ref, NewTasks}, State) ->
     #state{ current_tasks = Curr
+          , graph = G
           } = State,
     event(defer_task, Ref, State),
     State1 =
         case push_tasks(NewTasks, State, {just, Ref}) of
             ok ->
                 State#state{ current_tasks = map_sets:del_element(Ref, Curr)
+                           , candidates = task_graph_digraph:unlocked_tasks(G)
                            };
             Err ->
                 push_error(Ref, Err, State)
@@ -141,17 +154,20 @@ handle_cast({defer_task, Ref, NewTasks}, State) ->
 handle_cast(maybe_pop_tasks, State) ->
     #state{ graph = G
           , current_tasks = CurrentlyRunningTasks
+          , candidates = Candidates
           } = State,
     event(shed_begin, State),
     case is_success(State) of
         true ->
             %% There are no failed tasks, proceed
-            {ok, Tasks} = task_graph_digraph:pre_schedule_tasks( G
-                                                               , CurrentlyRunningTasks
-                                                               );
+            {ok, NewCandidates, Tasks} =
+                task_graph_digraph:pre_schedule_tasks( G
+                                                     , Candidates
+                                                     );
         false ->
             %% Something's failed, don't schedule new tasks
-            Tasks = []
+            Tasks = [],
+            NewCandidates = Candidates
     end,
     event(shed_end, State),
     case Tasks of
@@ -166,8 +182,10 @@ handle_cast(maybe_pop_tasks, State) ->
             end;
         _ ->
             %% Schedule new tasks
+            State1 = State#state{ candidates = NewCandidates
+                                },
             State2 = lists:foldl( fun run_task/2
-                                , State
+                                , State1
                                 , Tasks
                                 ),
             {noreply, State2}
@@ -339,6 +357,12 @@ spawn_task( Task = #tg_task{ id = Ref
                                    )
               end
       end).
+
+-spec merge_candidates( [task_graph_digraph:candidate()]
+                      , [task_graph_digraph:candidate()]
+                      ) -> [task_graph_digraph:candidate()].
+merge_candidates(C1, C2) ->
+    C1 ++ C2.
 
 -spec do_run_guard( pid()
                   , pid()
