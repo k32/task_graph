@@ -17,6 +17,7 @@
         , t_deferred/1
         , t_guards/1
         , t_no_guards/1
+        , t_proper_only/1
         ]).
 
 %% gen_event callbacks:
@@ -41,18 +42,27 @@
 -define(NUMTESTS, 1000).
 -define(SIZE, 1000).
 
+-define(SHEDULE_STATS_TABLE, tg_SUITE_stats_sched_table).
+-define(EXPAND_STATS_TABLE, tg_SUITE_stats_ext_table).
+-define(STATS_RESOLUTION, 200).
+
 -define(RUN_PROP(PROP, SIZE),
         begin
             %% Workaround against CT's "wonderful" features:
             OldGL = group_leader(),
             group_leader(whereis(user), self()),
             io:format(??PROP),
+            catch ets:delete(?SHEDULE_STATS_TABLE),
+            ets:new(?SHEDULE_STATS_TABLE, [named_table]),
+            catch ets:delete(?EXPAND_STATS_TABLE),
+            ets:new(?EXPAND_STATS_TABLE,  [named_table]),
             Result = proper:quickcheck( PROP()
                                       , [ {numtests, ?NUMTESTS}
                                         , {max_size, SIZE}
                                         ]
                                       ),
             group_leader(OldGL, self()),
+            analyse_statistics(),
             true = Result
         end).
 
@@ -74,6 +84,7 @@ topology_succ() ->
                 Opts = #{event_handlers => [send_back()]},
                 {ok, _} = task_graph:run_graph(foo, Opts, DAG),
                 Events = collect_events(),
+                collect_statistics(Events),
                 Tasks = collect_all_tasks(DAG),
                 check_topology(Tasks, Events)
             end).
@@ -101,6 +112,7 @@ deferred() ->
                 Opts = #{event_handlers => [send_back()]},
                 {ok, _} = task_graph:run_graph(foo, Opts, DAG),
                 Events = collect_events(),
+                collect_statistics(Events),
                 Tasks = collect_all_tasks(DAG),
                 check_topology(Tasks, Events)
             end).
@@ -189,6 +201,7 @@ resources() ->
                    },
            {ok, _} = task_graph:run_graph(foo, Opts, DAG),
            Events = collect_events(),
+           collect_statistics(Events),
            Tasks = collect_all_tasks(DAG),
            lists:foldl( check_resource_usage(Tasks, Limits)
                       , Limits
@@ -296,6 +309,13 @@ t_no_guards(_Config) ->
     [ok] = [ok || #tg_event{kind = spawn_task, data = 0} <- Events],
     ok.
 
+proper_only() ->
+    ?FORALL(DAG, dag({guard, boolean()}), true).
+
+t_proper_only(_Config) ->
+    ?RUN_PROP(proper_only),
+    ok.
+
 %%%===================================================================
 %%% Proper generators
 %%%===================================================================
@@ -343,6 +363,71 @@ inject_deferred() ->
 %%%===================================================================
 %%% Utility functions:
 %%%===================================================================
+
+collect_statistics(Events) ->
+    NTasks = length(events_of_kind([spawn_task], Events)),
+    Key = (NTasks div ?STATS_RESOLUTION) * ?STATS_RESOLUTION,
+    push_event_duration(shed_begin, shed_end, ?SHEDULE_STATS_TABLE, Key, Events),
+    push_event_duration(extend_begin, extend_end, ?EXPAND_STATS_TABLE, Key, Events),
+    ok.
+
+analyse_statistics() ->
+    case ets:first(?SHEDULE_STATS_TABLE) of
+        '$end_of_table' ->
+            io:format(user, "No statistics.~n", []),
+            ok;
+        _ ->
+            io:format(user, "Scheduling:~n", []),
+            analyse_statistics(?SHEDULE_STATS_TABLE),
+            io:format(user, "Extention:~n", []),
+            analyse_statistics(?EXPAND_STATS_TABLE)
+    end.
+
+analyse_statistics(Table) ->
+    Stats0 = [{Key, bear:get_statistics(Vals)}
+              || {Key, Vals} <- lists:keysort(1, ets:tab2list(Table))
+             ],
+    Stats = lists:filter( fun({_, Val}) ->
+                              proplists:get_value(n, Val) > 0
+                          end
+                        , Stats0
+                        ),
+    io:format(user, "     N    min      max       avg~n", []),
+    lists:foreach( fun({Key, Stats}) ->
+                       io:format(user, "~6b ~f ~f ~f~n",
+                                 [ Key
+                                 , proplists:get_value(min, Stats) * 1.0
+                                 , proplists:get_value(max, Stats) * 1.0
+                                 , proplists:get_value(arithmetic_mean, Stats) * 1.0
+                                 ])
+                   end
+                 , Stats
+                 ),
+    {_, Last} = lists:last(Stats),
+    io:format(user, "Stats:~n~p~n", [Last]).
+
+push_event_duration(K1, K2, Table, Key, Events) ->
+    L1 = events_of_kind([K1], Events),
+    L2 = events_of_kind([K2], Events),
+    Dt = lists:sum(lists:zipwith( fun( #tg_event{timestamp = T1}
+                                     , #tg_event{timestamp = T2}
+                                     ) ->
+                                      T2 - T1
+                                  end
+                                , L1
+                                , L2
+                                )),
+    true = Dt >= 0,
+    case ets:lookup(Table, Key) of
+      [{Key, OldVals}] ->
+          ok;
+      [] ->
+          OldVals = []
+    end,
+    ets:insert(Table, {Key, [Dt] ++ OldVals}).
+
+events_of_kind(Kinds, Events) ->
+    [E || E = #tg_event{kind = Kind} <- Events, lists:member(Kind, Kinds)].
 
 collect_all_tasks(DAG) ->
     collect_all_tasks(DAG, #{}).
