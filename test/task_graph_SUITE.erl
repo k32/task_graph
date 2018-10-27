@@ -40,7 +40,7 @@
 
 -define(TIMEOUT, 1200).
 -define(NUMTESTS, 1000).
--define(SIZE, 1000).
+-define(SIZE, 8000).
 
 -define(SHEDULE_STATS_TABLE, tg_SUITE_stats_sched_table).
 -define(EXPAND_STATS_TABLE, tg_SUITE_stats_ext_table).
@@ -63,7 +63,7 @@
                                         ]
                                       ),
             group_leader(OldGL, self()),
-            analyse_statistics(),
+            catch analyse_statistics(),
             T1 = erlang:system_time(?tg_timeUnit),
             io:format(user, "Testcase ran for ~p ms~n", [T1 - T0]),
             true = Result
@@ -569,6 +569,14 @@ is_task_changed(Id, Tasks) ->
         _ ->
             true
     end.
+
+halp() ->
+    dbg:stop(),
+    dbg:start(),
+    dbg:tracer(),
+    dbg:p(new_processes, [c]),
+    dbg:tpl(task_graph_actor, []),
+    dbg:tpl(task_graph_server, []).
 
 %%%===================================================================
 %%% gen_event boilerplate
