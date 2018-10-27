@@ -40,7 +40,7 @@
 
 -define(TIMEOUT, 1200).
 -define(NUMTESTS, 1000).
--define(SIZE, 1000).
+-define(SIZE, 16000).
 
 -define(SHEDULE_STATS_TABLE, tg_SUITE_stats_sched_table).
 -define(EXPAND_STATS_TABLE, tg_SUITE_stats_ext_table).
