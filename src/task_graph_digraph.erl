@@ -23,7 +23,7 @@
         , complete_task/4
         , add_dependencies/2
         , pre_schedule_tasks/2
-        , unlocked_tasks/1
+        , unlocked_tasks/2
         , print_graph/1
         , get_task_result/2
         ]).
@@ -292,9 +292,19 @@ pre_schedule_tasks(Graph, Candidates) ->
                    ),
     {ok, NewCandidates, Allocated}.
 
--spec unlocked_tasks(digraph()) -> [candidate()].
-unlocked_tasks(#task_graph{vertices = VV}) ->
-    lists:map(fun list_to_tuple/1, ets:match(VV, ?READY_TO_GO)).
+-spec unlocked_tasks(digraph(), map_sets:set(task_graph:task_id())) -> [candidate()].
+unlocked_tasks(#task_graph{vertices = VV}, Excluded) ->
+    lists:foldl( fun(L = [Id|_], Acc) ->
+                         case map_sets:is_element(Id, Excluded) of
+                             false ->
+                                 [list_to_tuple(L)|Acc];
+                             true ->
+                                 Acc
+                         end
+                 end
+               , []
+               , ets:match(VV, ?READY_TO_GO)
+               ).
 
 -spec alloc_resources( ets:tid()
                      , [task_graph:resource_id()]
@@ -459,34 +469,14 @@ search_tasks_test() ->
                       , #tg_task{id = 1}
                       , #tg_task{id = 2}
                       ]),
-    %% ?assertMatch( [ ?MATCH_TASK(0)
-    %%               , ?MATCH_TASK(1)
-    %%               , ?MATCH_TASK(2)
-    %%               ]
-    %%             , lists:sort(element( 3
-    %%                                 , pre_schedule_tasks(G, [])
-    %%                                 ))
-    %%             ),
     ok = add_dependencies(G, [ {0, 1}
                              , {0, 2}
                              , {1, 2}
                              ]),
-    ?assertMatch([{0, _, 2}], unlocked_tasks(G)),
-    %% ?assertMatch( {ok, [], [?MATCH_TASK(0)]}
-    %%             , pre_schedule_tasks(G, #{})
-    %%             ),
-    %% ?assertMatch( {ok, [], []}
-    %%             , pre_schedule_tasks(G, map_sets:from_list([0]))
-    %%             ),
+    ?assertMatch([{0, _, 2}], unlocked_tasks(G, #{})),
     ?assertMatch({ok, [{1, _, 1}]}, complete_task(G, 0, true, undefined)),
-    ?assertMatch([{1, _, 1}], unlocked_tasks(G)),
-    %% ?assertMatch( {ok, [?MATCH_TASK(1)]}
-    %%             , pre_schedule_tasks(G, #{})
-    %%             ),
+    ?assertMatch([{1, _, 1}], unlocked_tasks(G, #{})),
     ?assertMatch({ok, [{2, _, 0}]}, complete_task(G, 1, true, undefined)),
-    ?assertMatch([{2, _, 0}], unlocked_tasks(G)),
-    %% ?assertMatch( {ok, [?MATCH_TASK(2)]}
-    %%             , pre_schedule_tasks(G, #{})
-    %%             ).
+    ?assertMatch([{2, _, 0}], unlocked_tasks(G, #{})),
     ok.
 -endif.

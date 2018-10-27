@@ -94,7 +94,7 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
                    , event_mgr = EventMgr
                    , parent = Parent
                    , guards = not maps:get(disable_guards, Settings, false)
-                   , candidates = task_graph_digraph:unlocked_tasks(Graph)
+                   , candidates = task_graph_digraph:unlocked_tasks(Graph, #{})
                    }}
     catch
         _:{badmatch, {error, circular_dependencies, Cycle}} ->
@@ -110,6 +110,7 @@ handle_cast({complete_task, Ref, _Success = false, _Changed, Return, _}, State) 
     {noreply, push_error(Ref, Return, State)};
 handle_cast({complete_task, Ref, _Success = true, Changed, Return, NewTasks}, State) ->
     #state{ candidates = OldCandidates
+          , current_tasks = Curr
           , graph = G
           } = State,
     event(complete_task, Ref, State),
@@ -123,7 +124,7 @@ handle_cast({complete_task, Ref, _Success = true, Changed, Return, NewTasks}, St
                             merge_candidates(Unlocked, OldCandidates);
                         _ ->
                             %% TODO: Perhaps it's not necessary to do a full search
-                            task_graph_digraph:unlocked_tasks(G)
+                            task_graph_digraph:unlocked_tasks(G, Curr)
                     end,
                 State#state{ current_tasks =
                                  maps:remove(Ref, State#state.current_tasks)
@@ -136,15 +137,16 @@ handle_cast({complete_task, Ref, _Success = true, Changed, Return, NewTasks}, St
     maybe_pop_tasks(),
     {noreply, State1};
 handle_cast({defer_task, Ref, NewTasks}, State) ->
-    #state{ current_tasks = Curr
+    #state{ current_tasks = Curr0
           , graph = G
           } = State,
     event(defer_task, Ref, State),
+    Curr = map_sets:del_element(Ref, Curr0),
     State1 =
         case push_tasks(NewTasks, State, {just, Ref}) of
             ok ->
-                State#state{ current_tasks = map_sets:del_element(Ref, Curr)
-                           , candidates = task_graph_digraph:unlocked_tasks(G)
+                State#state{ current_tasks = Curr
+                           , candidates = task_graph_digraph:unlocked_tasks(G, Curr)
                            };
             Err ->
                 push_error(Ref, Err, State)
