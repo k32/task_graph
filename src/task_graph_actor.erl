@@ -12,13 +12,7 @@
         ]).
 
 %% gen_statem callbacks
--export([callback_mode/0, init/1, terminate/3, code_change/4]).
-
-%% States
--export([ startup/3
-        , wait_deps/3
-        , wait_resources/3
-        ]).
+-export([callback_mode/0, handle_event/4, init/1, terminate/3, code_change/4]).
 
 -record(d,
         { id                         :: task_graph:task_id()
@@ -40,15 +34,6 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Creates a gen_statem process which calls Module:init/1 to
-%% initialize. To ensure a synchronized start-up procedure, this
-%% function does not return until Module:init/1 has returned.
-%%
-%% @end
-%%--------------------------------------------------------------------
 -spec start_link( pid()
                 , task_graph:task()
                 , task_graph_runner:get_deps_result()
@@ -72,24 +57,9 @@ launch(Pid) ->
 %%%===================================================================
 %%% gen_statem callbacks
 %%%===================================================================
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Define the callback_mode() for this callback module.
-%% @end
-%%--------------------------------------------------------------------
 -spec callback_mode() -> gen_statem:callback_mode_result().
-callback_mode() -> [state_functions, state_enter].
+callback_mode() -> [handle_event_function, state_enter].
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Whenever a gen_statem is started using gen_statem:start/[3,4] or
-%% gen_statem:start_link/[3,4], this function is called by the new
-%% process to initialize.
-%% @end
-%%--------------------------------------------------------------------
 -spec init(Args :: term()) ->
                   gen_statem:init_result(atom()).
 init([ Parent
@@ -126,14 +96,16 @@ init([ Parent
                     , get_result_fun = GetResultFun
                     }}.
 
-startup(enter, _, _Data) ->
+%% Startup state:
+handle_event(enter, _, startup, _Data) ->
     keep_state_and_data;
-startup( {call, From}
-       , {add_requirement, Id, Pid}
-       , Data0 = #d{ requires = R0
-                   , n_deps = N0
-                   }
-       ) ->
+handle_event( {call, From}
+            , {add_requirement, Id, Pid}
+            , startup
+            , Data0 = #d{ requires = R0
+                        , n_deps = N0
+                        }
+            ) ->
     case R0 of
         #{Id := Pid0} ->
             N = N0,
@@ -147,10 +119,11 @@ startup( {call, From}
                   , n_changed_deps = N
                   },
     {keep_state, Data, [{reply, From, ok}]};
-startup( {call, From}
-       , {add_consumer, Id, Pid}
-       , Data0 = #d{provides = P0}
-       ) ->
+handle_event( {call, From}
+            , {add_consumer, Id, Pid}
+            , startup
+            , Data0 = #d{provides = P0}
+            ) ->
     case P0 of
         #{Id := Pid0} ->
             %% Assert:
@@ -161,31 +134,32 @@ startup( {call, From}
     Data = Data0#d{ provides = P0#{Id => Pid}
                   },
     {keep_state, Data, [{reply, From, ok}]};
-startup(cast, launch, D = #d{n_deps = N, resources = R}) ->
+handle_event(cast, launch, startup, D = #d{n_deps = N, resources = R}) ->
     case N of
         0 ->
             {next_state, wait_resources, D};
         _ ->
             {next_state, wait_deps, D}
-    end.
+    end;
 
-wait_deps(enter, _, Data) ->
+%% wait_deps state:
+handle_event(enter, _, wait_deps, Data) ->
     {next_state, wait_deps, Data};
-wait_deps( cast
-         , {dep_failed, DepId}
-         , Data = #d{ id     = Id
-                    , parent = P
-                    }
-         ) ->
+handle_event( cast
+            , {dep_failed, _DepId}
+            , wait_deps
+            , Data
+            ) ->
     complete_task(Data, false, true, dependency_failed, undefined),
     {stop, dep_failed};
-wait_deps( cast
-         , {dep_complete, Id, Unchanged}
-         , Data0 = #d{ n_deps         = N
-                     , n_changed_deps = U
-                     , requires       = Req
-                     }
-         ) ->
+handle_event( cast
+            , {dep_complete, Id, Unchanged}
+            , wait_deps
+            , Data0 = #d{ n_deps         = N
+                        , n_changed_deps = U
+                        , requires       = Req
+                        }
+            ) ->
     %% Assert:
     #{Id := _} = Req,
     %% Assert:
@@ -199,9 +173,13 @@ wait_deps( cast
                                              U
                                      end
                   },
-    check_deps(Data).
+    check_deps(Data);
 
-wait_resources(_, _Msg, Data) ->
+%% wait_resources state
+handle_event(enter, _, wait_resources, Data) ->
+    self() ! check_resources,
+    {next_state, wait_resources, Data};
+handle_event(info, check_resources, wait_resources, Data) ->
     execute(Data).
 
 terminate(_Reason, _State, _Data) ->
@@ -222,12 +200,7 @@ check_deps(Data = #d{n_deps = N}) ->
     end.
 
 -spec execute(#d{}) -> {stop, term()}.
-execute( Data = #d{ parent    = Parent
-                  , event_mgr = EventMgr
-                  , exec_fun  = RunTaskFun
-                  , guard_fun = GuardFun
-                  }
-       ) ->
+execute(Data) ->
     try
         DepsUnchanged = Data#d.n_changed_deps =:= 0,
         Unchanged = DepsUnchanged andalso do_run_guard(Data),
@@ -273,7 +246,6 @@ do_run_guard( Data = #d{ event_mgr      = EventMgr
 do_run_task( Data = #d{ id             = Ref
                       , data           = Payload
                       , parent         = Parent
-                      , event_mgr      = EventMgr
                       , exec_fun       = RunTaskFun
                       , get_result_fun = GetDepResult
                       }
@@ -328,8 +300,7 @@ complete_task(#d{ id        = Id
              , NewTasks
              ) ->
     event(complete_task, Id, EventMgr),
-    task_graph_server:complete_task(Parent, Id, Success, Result),
-    %%ok = task_graph_server:add_tasks(Parent, NewTask
+    task_graph_server:complete_task(Parent, Id, Success, Result, NewTasks),
     maps:map( fun(_Id, Pid) ->
                       gen_statem:cast(Pid, {dep_complete, Id, not Changed})
               end
@@ -352,10 +323,11 @@ complete_task(#d{ id        = Id
               end
             , Prov
             ),
-    task_graph_server:complete_task(Parent, Id, Success, Error),
+    task_graph_server:complete_task(Parent, Id, Success, Error, undefined),
     {stop, error}.
 
 -spec defer_task(#d{}, task_graph:digraph()) -> {next_state, startup, #d{}}.
-defer_task(Data = #d{parent = Pid, id = Id}, NewTasks) ->
+defer_task(Data = #d{parent = Pid, id = Id, event_mgr = EventMgr}, NewTasks) ->
+    event(defer_task, Id, EventMgr),
     task_graph_server:extend_graph(Pid, Id, NewTasks),
     {next_state, startup, Data}.

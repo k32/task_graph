@@ -6,10 +6,11 @@
 
 %% API
 -export([ run_graph/3
-        , complete_task/4
+        , complete_task/5
         , extend_graph/3
         , event/3
         , event/2
+        , abort_execution/2
         ]).
 
 %% gen_server callbacks
@@ -39,6 +40,10 @@
                    | pid()
                    | undefined
                    .
+
+%% Must be infinity in production, however it's useful to lower it
+%% during troubleshooting:
+-define(TIMEOUT, 100).
 
 %%%===================================================================
 %%% API
@@ -94,8 +99,8 @@ run_graph(TaskName, Settings, Tasks) ->
             Err
     end.
 
-complete_task(Pid, Id, Success, Result) ->
-    gen_server:call(Pid, {complete_task, Id, Success, Result}).
+complete_task(Pid, Id, Success, Result, NewTasks) ->
+    gen_server:call(Pid, {complete_task, Id, Success, Result, NewTasks}, ?TIMEOUT).
 
 extend_graph(Pid, ParentTask, G) ->
     gen_server:cast(Pid, {extend_graph, ParentTask, G}).
@@ -111,11 +116,16 @@ event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
                                }
                     ).
 
+-spec abort_execution(pid(), term()) -> ok.
+abort_execution(Pid, Reason) ->
+    gen_server:call(Pid, Reason, ?TIMEOUT).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
 init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
+    process_flag(trap_exit, true),
     ResourceLimits = maps:get(resources, Settings, #{}),
     Tab = ets:new(TaskName, [{keypos, #vertex.id}, protected]),
     State = #state{ tasks_table = Tab
@@ -125,13 +135,13 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
                   },
     do_extend_graph(Tasks, undefined, State).
 
-handle_call( {complete_task, Id, Success1, Result}
+handle_call( {complete_task, Id, Success1, Result, NewTasks}
            , From
-           , State = #state{ n_left      = N
-                           , tasks_table = Tab
-                           , success     = Success0
-                           , parent      = Parent
-                           }
+           , State0 = #state{ n_left      = N
+                            , tasks_table = Tab
+                            , success     = Success0
+                            , parent      = Parent
+                            }
            ) ->
     %% Assert:
     [Vertex0] = ets:lookup(Tab, Id),
@@ -145,21 +155,26 @@ handle_call( {complete_task, Id, Success1, Result}
                                   , result = ResultTuple
                                   }),
     Success = Success0 andalso Success1,
-    case N of
-        1 -> %% It was a last task
-            ReturnValue = case Success of
-                              true ->
-                                  {ok, #{}};
-                              false ->
-                                  {error, #{}} % FIXME
-                          end,
-            Parent ! {result, self(), ReturnValue},
-            gen_server:reply(From, ok),
-            {stop, normal, State};
-        _ when N > 1 ->
-            {reply, ok, State#state{ n_left = N - 1
-                                   , success = Success
-                                   }}
+    case do_extend_graph(NewTasks, undefined, State0) of
+        {ok, State} ->
+            case N of
+                1 -> %% It was a last task
+                    ReturnValue = case Success of
+                                      true ->
+                                          {ok, #{}};
+                                      false ->
+                                          {error, #{}} % FIXME
+                                  end,
+                    Parent ! {result, self(), ReturnValue},
+                    gen_server:reply(From, ok),
+                    {stop, normal, State};
+                _ when N > 1 ->
+                    {reply, ok, State#state{ n_left = N - 1
+                                           , success = Success
+                                           }}
+            end;
+        {stop, Err} ->
+            {stop, {topology_error, Err}, State0}
     end;
 handle_call(_Request, _From, State) ->
     Reply = ok,
@@ -169,8 +184,8 @@ handle_cast({extend_graph, ParentTask, G}, State) ->
     case do_extend_graph(G, ParentTask, State) of
         {ok, State1} ->
             {noreply, State1};
-        Err ->
-            Err
+        {stop, Err} ->
+            {stop, Err, State}
     end;
 handle_cast(_Cast, State) ->
     {noreply, State}.
@@ -189,6 +204,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+do_extend_graph(undefined, _, State) ->
+    {ok, State};
 do_extend_graph( {Vertices0, Edges}
                , ParentTaskId
                , State = #state{ event_mgr   = EventMgr
@@ -199,6 +216,8 @@ do_extend_graph( {Vertices0, Edges}
     %% FIXME: `ParentTaskId == undefined' will create all kind of mess here...
     event(extend_begin, EventMgr),
     Vertices = lists:usort(Vertices0),
+    event(add_tasks, Vertices, EventMgr),
+    event(add_dependencies, Edges, EventMgr),
     GetDepResult = fun(Id) ->
                            case ets:lookup(Tab, Id) of
                                [#vertex{done = true, result = R}] ->
@@ -209,22 +228,23 @@ do_extend_graph( {Vertices0, Edges}
                    end,
     case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
         ok ->
-            Pids =
-                lists:map( fun(#tg_task{id = Id}) when Id == ParentTaskId ->
-                                   ets:lookup_element(Tab, ParentTaskId, #vertex.pid);
-                              (Task) ->
-                                   {ok, Pid} = task_graph_actor:start_link( EventMgr
-                                                                          , Task
-                                                                          , GetDepResult
-                                                                          ),
-                                   ets:insert_new(Tab, #vertex{ id = Task#tg_task.id
-                                                              , task = Task
-                                                              , pid = Pid
-                                                              }),
-                                   Pid
-                           end
-                         , Vertices
-                         ),
+            {NNew, Pids} =
+                lists:foldl( fun(#tg_task{id = Id}, {N, Acc}) when Id =:= ParentTaskId ->
+                                     {N, Acc};
+                                (Task, {N, Acc}) ->
+                                     {ok, Pid} = task_graph_actor:start_link( EventMgr
+                                                                            , Task
+                                                                            , GetDepResult
+                                                                            ),
+                                     ets:insert_new(Tab, #vertex{ id = Task#tg_task.id
+                                                                , task = Task
+                                                                , pid = Pid
+                                                                }),
+                                     {N + 1, [Pid|Acc]}
+                             end
+                           , {0, []}
+                           , Vertices
+                           ),
             lists:foreach( fun({From, To}) ->
                                    [#vertex{pid = PFrom}] = ets:lookup(Tab, From),
                                    [#vertex{pid = PTo}] = ets:lookup(Tab, To),
@@ -238,14 +258,14 @@ do_extend_graph( {Vertices0, Edges}
                            end
                          , Pids
                          ),
-            event(extend_end, EventMgr),
             case ParentTaskId of
                 undefined ->
-                    N = N0 + length(Vertices);
+                    ok;
                 _ ->
-                    N = N0 + length(Vertices) - 1
+                    task_graph_actor:launch(ets:lookup_element(Tab, ParentTaskId, #vertex.pid))
             end,
-            {ok, State#state{ n_left = N
+            event(extend_end, EventMgr),
+            {ok, State#state{ n_left = N0 + NNew
                             }};
         {error, Err} ->
             {stop, {topology_error, Err}}
@@ -280,7 +300,7 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
                                A orelse B orelse throw({missing_dependency, From}),
                                {C, D} = IsValidId(To),
                                D andalso To =/= ParentTaskId andalso throw({time_paradox, From, To}),
-                               C orelse throw({missing_consumer, To})
+                               C orelse  To =:= ParentTaskId orelse throw({missing_consumer, To})
                        end
                      , Edges
                      ),

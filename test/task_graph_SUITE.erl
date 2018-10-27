@@ -13,7 +13,7 @@
         , t_topology_succ/1
         , t_topology/1
         , t_error_handling/1
-        , t_resources/1
+        %, t_resources/1
         , t_deferred/1
         , t_guards/1
         , t_no_guards/1
@@ -40,7 +40,7 @@
 
 -define(TIMEOUT, 1200).
 -define(NUMTESTS, 1000).
--define(SIZE, 8000).
+-define(SIZE, 1000).
 
 -define(SHEDULE_STATS_TABLE, tg_SUITE_stats_sched_table).
 -define(EXPAND_STATS_TABLE, tg_SUITE_stats_ext_table).
@@ -491,8 +491,12 @@ check_topology(Tasks, Events) ->
                                    ),
     %% Check that all tasks have been executed exactly once:
     lists:foreach( fun(Key) ->
-                           Val = maps:get(Key, RanTimes),
-                           1 == Val orelse error({'Task', Key, 'ran', Val, 'times instead of 1'})
+                           Val = maps:get(Key, RanTimes, 0),
+                           1 == Val orelse
+                               begin
+                                   io:format(user, "Events: ~p~n", [Events]),
+                                   error({'Task', Key, 'ran', Val, 'times instead of 1'})
+                               end
                    end
                  , maps:keys(Tasks)
                  ),
@@ -572,6 +576,7 @@ is_task_changed(Id, Tasks) ->
 
 halp() ->
     dbg:stop(),
+    io:format(user, "HALP!!!~n", []),
     dbg:start(),
     dbg:tracer(),
     dbg:p(new_processes, [c]),
