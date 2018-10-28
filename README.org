@@ -2,8 +2,6 @@
 
 [[https://travis-ci.org/k32/task_graph.svg?branch=master]]
 
-*This library has not been released yet, APIs _will_ be broken!*
-
 * Description
 
 Yet another library rethinking good old /make/, implemented in pure
