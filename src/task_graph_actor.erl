@@ -146,12 +146,12 @@ handle_event(cast, launch, startup, D = #d{n_deps = N, resources = R}) ->
 handle_event(enter, _, wait_deps, Data) ->
     {next_state, wait_deps, Data};
 handle_event( cast
-            , {dep_failed, _DepId}
+            , {dep_failed, DepId}
             , wait_deps
             , Data
             ) ->
-    complete_task(Data, false, true, dependency_failed, undefined),
-    {stop, dep_failed};
+    complete_task(Data, false, true, {dependency_failed, DepId}, undefined),
+    {stop, normal};
 handle_event( cast
             , {dep_complete, Id, Unchanged}
             , wait_deps
@@ -203,11 +203,11 @@ check_deps(Data = #d{n_deps = N}) ->
 execute(Data) ->
     try
         DepsUnchanged = Data#d.n_changed_deps =:= 0,
-        Unchanged = DepsUnchanged andalso do_run_guard(Data),
-        if Unchanged ->
-                {stop, complete};
-           true ->
-                do_run_task(Data)
+        case DepsUnchanged andalso do_run_guard(Data) of
+            false ->
+                do_run_task(Data);
+            Result ->
+                Result
         end
     catch
         _:Err ?BIND_STACKTRACE(Stack) ->
@@ -220,7 +220,7 @@ execute(Data) ->
                          )
     end.
 
--spec do_run_guard(#d{}) -> boolean().
+-spec do_run_guard(#d{}) -> false | {stop, term()}.
 do_run_guard( Data = #d{ event_mgr      = EventMgr
                        , guard_fun      = GuardFun
                        , data           = Payload
@@ -233,11 +233,9 @@ do_run_guard( Data = #d{ event_mgr      = EventMgr
     event(guard_complete, Ref, EventMgr),
     case Result of
         unchanged ->
-            complete_task(Data, Ref, true, false, undefined),
-            true;
+            complete_task(Data, true, false, undefined, undefined);
         {unchanged, Return} ->
-            complete_task(Data, Ref, true, false, Return),
-            true;
+            complete_task(Data, true, false, Return, undefined);
         changed ->
             false
     end.
@@ -245,6 +243,7 @@ do_run_guard( Data = #d{ event_mgr      = EventMgr
 -spec do_run_task(#d{}) -> {stop, term()}.
 do_run_task( Data = #d{ id             = Ref
                       , data           = Payload
+                      , event_mgr      = EventMgr
                       , parent         = Parent
                       , exec_fun       = RunTaskFun
                       , get_result_fun = GetDepResult
@@ -312,7 +311,7 @@ complete_task(#d{ id        = Id
                 , event_mgr = EventMgr
                 , provides  = Prov
                 }
-             , Success = false
+             , _Success = false
              , _Changed
              , Error
              , _NewTasks
@@ -323,8 +322,8 @@ complete_task(#d{ id        = Id
               end
             , Prov
             ),
-    task_graph_server:complete_task(Parent, Id, Success, Error, undefined),
-    {stop, error}.
+    task_graph_server:complete_task(Parent, Id, false, Error, undefined),
+    {stop, normal}.
 
 -spec defer_task(#d{}, task_graph:digraph()) -> {next_state, startup, #d{}}.
 defer_task(Data = #d{parent = Pid, id = Id, event_mgr = EventMgr}, NewTasks) ->

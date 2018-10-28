@@ -11,7 +11,7 @@
 -record(tg_event,
         { timestamp :: integer()
         , kind      :: atom()
-        , data      :: term() | undefined
+        , data      :: term()
         }).
 
 -endif.

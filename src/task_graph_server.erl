@@ -34,6 +34,15 @@
         , result
         }).
 
+-define(FAILED_VERTEX,
+        { vertex
+        ,  _id    = '$1'
+        , _pid    = '_'
+        , _task   = '_'
+        , _done   = true
+        , _result = {error, '$2'}
+        }).
+
 -type event_mgr() :: atom()
                    | {atom(), atom()}
                    | {global, term()}
@@ -41,9 +50,7 @@
                    | undefined
                    .
 
-%% Must be infinity in production, however it's useful to lower it
-%% during troubleshooting:
--define(TIMEOUT, 100).
+-define(TIMEOUT, infinity).
 
 %%%===================================================================
 %%% API
@@ -137,10 +144,9 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
 
 handle_call( {complete_task, Id, Success1, Result, NewTasks}
            , From
-           , State0 = #state{ n_left      = N
-                            , tasks_table = Tab
+           , State0 = #state{ tasks_table = Tab
                             , success     = Success0
-                            , parent      = Parent
+                            , n_left      = N
                             }
            ) ->
     %% Assert:
@@ -155,23 +161,17 @@ handle_call( {complete_task, Id, Success1, Result, NewTasks}
                                   , result = ResultTuple
                                   }),
     Success = Success0 andalso Success1,
-    case do_extend_graph(NewTasks, undefined, State0) of
+    State1 = State0#state{ n_left = N - 1
+                         , success = Success
+                         },
+    case do_extend_graph(NewTasks, undefined, State1) of
         {ok, State} ->
-            case N of
-                1 -> %% It was a last task
-                    ReturnValue = case Success of
-                                      true ->
-                                          {ok, #{}};
-                                      false ->
-                                          {error, #{}} % FIXME
-                                  end,
-                    Parent ! {result, self(), ReturnValue},
+            case State#state.n_left of
+                0 -> %% It was the last task
                     gen_server:reply(From, ok),
-                    {stop, normal, State};
-                _ when N > 1 ->
-                    {reply, ok, State#state{ n_left = N - 1
-                                           , success = Success
-                                           }}
+                    complete_graph(State);
+                _ ->
+                    {reply, ok, State}
             end;
         {stop, Err} ->
             {stop, {topology_error, Err}, State0}
@@ -322,3 +322,21 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
         Err ->
             {error, Err}
     end.
+
+complete_graph(State = #state{ parent = Parent
+                             , success = Success
+                             , tasks_table = Tab
+                             }
+              ) ->
+    Errors0 = ets:match(Tab, ?FAILED_VERTEX),
+    Errors = maps:from_list([{Id, Err} || [Id, Err] <- Errors0]),
+    ReturnValue = case Success of
+                      true ->
+                          %% Assert:
+                          Errors = #{},
+                          {ok, #{}};
+                      false ->
+                          {error, Errors}
+                  end,
+    Parent ! {result, self(), ReturnValue},
+    {stop, normal, State}.
