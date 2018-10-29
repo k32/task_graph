@@ -150,7 +150,7 @@ handle_event( cast
             , wait_deps
             , Data
             ) ->
-    complete_task(Data, false, true, {dependency_failed, DepId}, undefined),
+    complete_task(Data, {aborted, {dependency_failed, DepId}}, true, undefined),
     {stop, normal};
 handle_event( cast
             , {dep_complete, Id, Unchanged}
@@ -213,9 +213,8 @@ execute(Data) ->
         _:Err ?BIND_STACKTRACE(Stack) ->
             ?GET_STACKTRACE(Stack),
             complete_task( Data
-                         , _success = false
+                         , {error, {uncaught_exception, Err, Stack}}
                          , _changed = true
-                         , {uncaught_exception, Err, Stack}
                          , undefined
                          )
     end.
@@ -233,14 +232,14 @@ do_run_guard( Data = #d{ event_mgr      = EventMgr
     event(guard_complete, Ref, EventMgr),
     case Result of
         unchanged ->
-            complete_task(Data, true, false, undefined, undefined);
+            complete_task(Data, {ok, undefined}, false, undefined);
         {unchanged, Return} ->
-            complete_task(Data, true, false, Return, undefined);
+            complete_task(Data, {ok, Return}, false, undefined);
         changed ->
             false
     end.
 
--spec do_run_task(#d{}) -> {stop, term()}.
+-spec do_run_task(#d{}) -> {stop, normal}.
 do_run_task( Data = #d{ id             = Ref
                       , data           = Payload
                       , event_mgr      = EventMgr
@@ -254,23 +253,20 @@ do_run_task( Data = #d{ id             = Ref
     case Return of
         ok ->
             complete_task( Data
-                         , _success = true
+                         , {ok, undefined}
                          , _changed = true
-                         , undefined
                          , undefined
                          );
         {ok, Result} ->
             complete_task( Data
-                         , _success = true
+                         , {ok, Result}
                          , _changed = true
-                         , Result
                          , undefined
                          );
         {ok, Result, NewTasks} ->
             complete_task( Data
-                         , _success = true
+                         , {ok, Result}
                          , _changed = true
-                         , Result
                          , NewTasks
                          );
 
@@ -279,27 +275,28 @@ do_run_task( Data = #d{ id             = Ref
 
         {error, Reason} ->
             complete_task( Data
-                         , _success = false
+                         , {error, Reason}
                          , _changed = true
-                         , Reason
                          , undefined
                          )
     end.
 
--spec complete_task(#d{}, boolean(), boolean(), term(), task_graph:tasks() | undefined) ->
-                           {stop, term()}.
+-spec complete_task( #d{}
+                   , {task_graph_server:result_type(), term()}
+                   , boolean()
+                   , task_graph:digraph() | undefined
+                   ) -> {stop, normal}.
 complete_task(#d{ id        = Id
                 , parent    = Parent
                 , event_mgr = EventMgr
                 , provides  = Prov
                 }
-             , Success = true
+             , {ok, Result}
              , Changed
-             , Result
              , NewTasks
              ) ->
     event(complete_task, Id, EventMgr),
-    task_graph_server:complete_task(Parent, Id, Success, Result, NewTasks),
+    task_graph_server:complete_task(Parent, Id, {ok, Result}, NewTasks),
     maps:map( fun(_Id, Pid) ->
                       gen_statem:cast(Pid, {dep_complete, Id, not Changed})
               end
@@ -311,9 +308,8 @@ complete_task(#d{ id        = Id
                 , event_mgr = EventMgr
                 , provides  = Prov
                 }
-             , _Success = false
+             , {ReturnType, Error}
              , _Changed
-             , Error
              , _NewTasks
              ) ->
     event(task_failed, [Id, Error], EventMgr),
@@ -322,7 +318,7 @@ complete_task(#d{ id        = Id
               end
             , Prov
             ),
-    task_graph_server:complete_task(Parent, Id, false, Error, undefined),
+    task_graph_server:complete_task(Parent, Id, {ReturnType, Error}, undefined),
     {stop, normal}.
 
 -spec defer_task(#d{}, task_graph:digraph()) -> {next_state, startup, #d{}}.

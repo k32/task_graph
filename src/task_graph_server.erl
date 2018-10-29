@@ -6,12 +6,15 @@
 
 %% API
 -export([ run_graph/3
-        , complete_task/5
+        , complete_task/4
         , extend_graph/3
         , event/3
         , event/2
         , abort_execution/2
         ]).
+
+-export_type([ result_type/0
+             ]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -43,6 +46,8 @@
         , _result = {error, '$2'}
         }).
 
+-type result_type() :: ok | error | aborted.
+
 -type event_mgr() :: atom()
                    | {atom(), atom()}
                    | {global, term()}
@@ -50,7 +55,7 @@
                    | undefined
                    .
 
--define(TIMEOUT, infinity).
+-define(TIMEOUT, 100).
 
 %%%===================================================================
 %%% API
@@ -106,8 +111,13 @@ run_graph(TaskName, Settings, Tasks) ->
             Err
     end.
 
-complete_task(Pid, Id, Success, Result, NewTasks) ->
-    gen_server:call(Pid, {complete_task, Id, Success, Result, NewTasks}, ?TIMEOUT).
+-spec complete_task( pid()
+                   , task_graph:task_id()
+                   , {result_type(), term()}
+                   , task_graph:digraph() | undefined
+                   ) -> ok.
+complete_task(Pid, Id, Result, NewTasks) ->
+    gen_server:call(Pid, {complete_task, Id, Result, NewTasks}, ?TIMEOUT).
 
 extend_graph(Pid, ParentTask, G) ->
     gen_server:cast(Pid, {extend_graph, ParentTask, G}).
@@ -132,7 +142,7 @@ abort_execution(Pid, Reason) ->
 %%%===================================================================
 
 init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
-    process_flag(trap_exit, true),
+    %% process_flag(trap_exit, true),
     ResourceLimits = maps:get(resources, Settings, #{}),
     Tab = ets:new(TaskName, [{keypos, #vertex.id}, protected]),
     State = #state{ tasks_table = Tab
@@ -142,7 +152,29 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
                   },
     do_extend_graph(Tasks, undefined, State).
 
-handle_call( {complete_task, Id, Success1, Result, NewTasks}
+handle_call( {complete_task, Id, {ErrorType, ErrorMsg}, _}
+           , From
+           , State0 = #state{ tasks_table = Tab
+                            , n_left      = N
+                            }
+           ) when ErrorType =:= error
+                ; ErrorType =:= aborted ->
+    %% Assert:
+    [Vertex0] = ets:lookup(Tab, Id),
+    ets:insert(Tab, Vertex0#vertex{ done   = true
+                                  , result = {ErrorType, ErrorMsg}
+                                  }),
+    State = State0#state{ n_left = N - 1
+                        , success = false
+                        },
+    case State#state.n_left of
+        0 ->
+            gen_server:reply(From, ok),
+            complete_graph(State);
+        _ ->
+            {reply, ok, State}
+    end;
+handle_call( {complete_task, Id, {ok, Result}, NewTasks}
            , From
            , State0 = #state{ tasks_table = Tab
                             , success     = Success0
@@ -151,18 +183,10 @@ handle_call( {complete_task, Id, Success1, Result, NewTasks}
            ) ->
     %% Assert:
     [Vertex0] = ets:lookup(Tab, Id),
-    ResultTuple =
-        if Success1 ->
-                {ok, Result};
-           true ->
-                {error, Result}
-        end,
     ets:insert(Tab, Vertex0#vertex{ done   = true
-                                  , result = ResultTuple
+                                  , result = {ok, Result}
                                   }),
-    Success = Success0 andalso Success1,
     State1 = State0#state{ n_left = N - 1
-                         , success = Success
                          },
     case do_extend_graph(NewTasks, undefined, State1) of
         {ok, State} ->
@@ -218,14 +242,15 @@ do_extend_graph( {Vertices0, Edges}
     Vertices = lists:usort(Vertices0),
     event(add_tasks, Vertices, EventMgr),
     event(add_dependencies, Edges, EventMgr),
-    GetDepResult = fun(Id) ->
-                           case ets:lookup(Tab, Id) of
-                               [#vertex{done = true, result = R}] ->
-                                   {ok, R};
-                               _ ->
-                                   error
-                           end
-                   end,
+    GetDepResult =
+        fun(Id) ->
+                case ets:lookup(Tab, Id) of
+                    [#vertex{done = true, result = R}] ->
+                        {ok, R};
+                    _ ->
+                        error
+                end
+        end,
     case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
         ok ->
             {NNew, Pids} =

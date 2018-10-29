@@ -171,7 +171,8 @@ error_handling() ->
                 {error, Result} = task_graph:run_graph(foo, DAG),
                 map_sets:is_subset( Result
                                   , map_sets:from_list(ExpectedErrors)
-                                  )
+                                  ) orelse
+                    error({Result, 'is not a subset of', ExpectedErrors})
             end)).
 
 %% Check that resource constraints are respected
