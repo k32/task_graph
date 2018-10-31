@@ -8,7 +8,7 @@
 -include_lib("task_graph/include/task_graph.hrl").
 
 run_task(Ref, error, _GetDepsResult) ->
-    {error, oh_no_task_failed, Ref};
+    {error, {oh_no_task_failed, Ref}};
 run_task(Ref, exception, _GetDepsResult) ->
     error({oh_no_task_crashed, Ref});
 run_task(Ref, #{deps := Deps}, GetDepsResult) ->

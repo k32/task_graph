@@ -10,7 +10,7 @@
         , extend_graph/3
         , event/3
         , event/2
-        , abort_execution/2
+        , abort/2
         ]).
 
 -export_type([ result_type/0
@@ -22,11 +22,13 @@
 
 %% server state
 -record(state,
-        { tasks_table    :: ets:tid()
-        , event_mgr      :: pid()
-        , parent         :: pid()
-        , n_left         :: non_neg_integer()
-        , success = true :: boolean()
+        { settings           :: #{task_graph:settings_key() => term()}
+        , tasks_table        :: ets:tid()
+        , event_mgr          :: pid()
+        , parent             :: pid()
+        , n_left             :: non_neg_integer()
+        , success = true     :: boolean()
+        , aborted = false    :: boolean()
         }).
 
 -record(vertex,
@@ -44,6 +46,15 @@
         , _task   = '_'
         , _done   = true
         , _result = {error, '$2'}
+        }).
+
+-define(ACTIVE_VERTEX,
+        { vertex
+        ,  _id    = '$1'
+        , _pid    = '$2'
+        , _task   = '_'
+        , _done   = false
+        , _result = '_'
         }).
 
 -type result_type() :: ok | error | aborted.
@@ -117,7 +128,8 @@ run_graph(TaskName, Settings, Tasks) ->
                    , task_graph:digraph() | undefined
                    ) -> ok.
 complete_task(Pid, Id, Result, NewTasks) ->
-    gen_server:call(Pid, {complete_task, Id, Result, NewTasks}, ?TIMEOUT).
+    From = self(),
+    gen_server:cast(Pid, {complete_task, From, Id, Result, NewTasks}).
 
 extend_graph(Pid, ParentTask, G) ->
     gen_server:cast(Pid, {extend_graph, ParentTask, G}).
@@ -133,9 +145,9 @@ event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
                                }
                     ).
 
--spec abort_execution(pid(), term()) -> ok.
-abort_execution(Pid, Reason) ->
-    gen_server:call(Pid, Reason, ?TIMEOUT).
+-spec abort(pid(), term()) -> ok.
+abort(Pid, Reason) ->
+    gen_server:call(Pid, {abort, Reason}, ?TIMEOUT).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -145,39 +157,49 @@ init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
     %% process_flag(trap_exit, true),
     ResourceLimits = maps:get(resources, Settings, #{}),
     Tab = ets:new(TaskName, [{keypos, #vertex.id}, protected]),
-    State = #state{ tasks_table = Tab
+    State = #state{ settings    = Settings
+                  , tasks_table = Tab
                   , parent      = Parent
                   , event_mgr   = EventMgr
                   , n_left      = 0
                   },
     do_extend_graph(Tasks, undefined, State).
 
-handle_call( {complete_task, Id, {ErrorType, ErrorMsg}, _}
-           , From
+handle_call({abort, Reason}, From, State0) ->
+    State = do_abort_graph(Reason, State0),
+    {reply, ok, State}.
+
+%% Handle new errors and `aborted' state:
+handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, _}
            , State0 = #state{ tasks_table = Tab
                             , n_left      = N
+                            , settings    = Settings
+                            , aborted     = Aborted
                             }
            ) when ErrorType =:= error
-                ; ErrorType =:= aborted ->
+                ; ErrorType =:= aborted
+                ; Aborted   =:= true ->
     %% Assert:
     [Vertex0] = ets:lookup(Tab, Id),
     ets:insert(Tab, Vertex0#vertex{ done   = true
                                   , result = {ErrorType, ErrorMsg}
                                   }),
+    task_graph_actor:rip(From),
+    KeepGoing = maps:get(keep_going, Settings, false),
     State = State0#state{ n_left = N - 1
                         , success = false
                         },
-    case State#state.n_left of
-        0 ->
-            gen_server:reply(From, ok),
+    case {State#state.n_left, KeepGoing} of
+        {0, _} ->
             complete_graph(State);
+        {_, true} ->
+            {noreply, State};
         _ ->
-            {reply, ok, State}
+            {noreply, do_abort_graph(task_failed, State)}
     end;
-handle_call( {complete_task, Id, {ok, Result}, NewTasks}
-           , From
+%% Handle successful task completion:
+handle_cast( {complete_task, From, Id, {ok, Result}, NewTasks}
            , State0 = #state{ tasks_table = Tab
-                            , success     = Success0
                             , n_left      = N
                             }
            ) ->
@@ -186,24 +208,20 @@ handle_call( {complete_task, Id, {ok, Result}, NewTasks}
     ets:insert(Tab, Vertex0#vertex{ done   = true
                                   , result = {ok, Result}
                                   }),
+    task_graph_actor:rip(From),
     State1 = State0#state{ n_left = N - 1
                          },
     case do_extend_graph(NewTasks, undefined, State1) of
         {ok, State} ->
             case State#state.n_left of
                 0 -> %% It was the last task
-                    gen_server:reply(From, ok),
                     complete_graph(State);
                 _ ->
-                    {reply, ok, State}
+                    {noreply, State}
             end;
         {stop, Err} ->
             {stop, {topology_error, Err}, State0}
     end;
-handle_call(_Request, _From, State) ->
-    Reply = ok,
-    {reply, Reply, State}.
-
 handle_cast({extend_graph, ParentTask, G}, State) ->
     case do_extend_graph(G, ParentTask, State) of
         {ok, State1} ->
@@ -235,6 +253,7 @@ do_extend_graph( {Vertices0, Edges}
                , State = #state{ event_mgr   = EventMgr
                                , tasks_table = Tab
                                , n_left      = N0
+                               , settings    = Settings
                                }
                ) ->
     %% FIXME: `ParentTaskId == undefined' will create all kind of mess here...
@@ -260,6 +279,7 @@ do_extend_graph( {Vertices0, Edges}
                                      {ok, Pid} = task_graph_actor:start_link( EventMgr
                                                                             , Task
                                                                             , GetDepResult
+                                                                            , Settings
                                                                             ),
                                      ets:insert_new(Tab, #vertex{ id = Task#tg_task.id
                                                                 , task = Task
@@ -347,6 +367,15 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
         Err ->
             {error, Err}
     end.
+
+-spec do_abort_graph(term(), #state{}) -> #state{}.
+do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->
+    lists:foreach( fun([_Id, Pid]) ->
+                           task_graph_actor:abort(Pid, Reason)
+                   end
+                 , ets:match(Tab, ?ACTIVE_VERTEX)
+                 ),
+    State#state{aborted = true}.
 
 complete_graph(State = #state{ parent = Parent
                              , success = Success

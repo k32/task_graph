@@ -34,6 +34,7 @@
                       | event_handlers
                       | resources
                       | disable_guards
+                      | keep_going
                       .
 
 %%--------------------------------------------------------------------
@@ -67,6 +68,9 @@ run_graph(Name, Tasks) ->
 %%
 %%    `disable_guards' is a boolean flag that forces execution of all
 %%    tasks. (Similar to ```make -B``` flag)
+%%
+%%    `keep_going' is a boolean flag that allows all tasks to run even
+%%     in presense of errors. False by default
 %%
 %% `Tasks' is a 2-tuple containing vertices and edges of the task
 %% graph, respectively. Vertices are represented by a list of
