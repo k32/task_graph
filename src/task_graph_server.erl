@@ -22,7 +22,7 @@
 
 %% server state
 -record(state,
-        { settings           :: #{task_graph:settings_key() => term()}
+        { settings           :: task_graph:settings()
         , tasks_table        :: ets:tid()
         , event_mgr          :: pid()
         , parent             :: pid()
@@ -77,7 +77,7 @@
 %% @end
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
-               , #{task_graph:settings_key() => term()}
+               , task_graph:settings()
                , task_graph:digraph()
                ) -> {ok, term()} | {error, term()}.
 run_graph(_, _, {[], _}) ->
@@ -261,48 +261,11 @@ do_extend_graph( {Vertices0, Edges}
     Vertices = lists:usort(Vertices0),
     event(add_tasks, Vertices, EventMgr),
     event(add_dependencies, Edges, EventMgr),
-    GetDepResult =
-        fun(Id) ->
-                case ets:lookup(Tab, Id) of
-                    [#vertex{done = true, result = R}] ->
-                        {ok, R};
-                    _ ->
-                        error
-                end
-        end,
     case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
         ok ->
-            {NNew, Pids} =
-                lists:foldl( fun(#tg_task{id = Id}, {N, Acc}) when Id =:= ParentTaskId ->
-                                     {N, Acc};
-                                (Task, {N, Acc}) ->
-                                     {ok, Pid} = task_graph_actor:start_link( EventMgr
-                                                                            , Task
-                                                                            , GetDepResult
-                                                                            , Settings
-                                                                            ),
-                                     ets:insert_new(Tab, #vertex{ id = Task#tg_task.id
-                                                                , task = Task
-                                                                , pid = Pid
-                                                                }),
-                                     {N + 1, [Pid|Acc]}
-                             end
-                           , {0, []}
-                           , Vertices
-                           ),
-            lists:foreach( fun({From, To}) ->
-                                   [#vertex{pid = PFrom}] = ets:lookup(Tab, From),
-                                   [#vertex{pid = PTo}] = ets:lookup(Tab, To),
-                                   task_graph_actor:add_consumer(PFrom, To, PTo),
-                                   task_graph_actor:add_requirement(PTo, From, PFrom)
-                           end
-                         , Edges
-                         ),
-            lists:foreach( fun(Pid) ->
-                                   task_graph_actor:launch(Pid)
-                           end
-                         , Pids
-                         ),
+            {NNew, Pids} = do_add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices),
+            do_add_edges(Tab, Edges),
+            lists:foreach(fun(Pid) -> task_graph_actor:launch(Pid) end, Pids),
             case ParentTaskId of
                 undefined ->
                     ok;
@@ -350,19 +313,9 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
                      , Edges
                      ),
         %% Check topology of the new graph:
-        DG = digraph:new(),
-        [digraph:add_vertex(DG, Id) || #tg_task{id = Id} <- Vertices],
-        [digraph:add_edge(DG, From, To)
-         || {From, To} <- Edges
-          , map_sets:is_element(From, NewIds)
-        ],
-        Acyclic = digraph_utils:is_acyclic(DG),
-        digraph:delete(DG),
-        if Acyclic ->
-                ok;
-           true ->
-                throw({cyclic_dependencies, []})
-        end
+        is_acyclic({Vertices, Edges}, NewIds) orelse
+            throw({circular_dependencies, []}),
+        ok
     catch
         Err ->
             {error, Err}
@@ -376,6 +329,74 @@ do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->
                  , ets:match(Tab, ?ACTIVE_VERTEX)
                  ),
     State#state{aborted = true}.
+
+-spec do_add_vertices( ets:tid()
+                     , pid()
+                     , task_graph:settings()
+                     , task_graph:task_id()
+                     , [#tg_task{}]
+                     ) -> {non_neg_integer(), [pid()]}.
+do_add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices) ->
+    GetDepResult =
+        fun(Id) ->
+                case ets:lookup(Tab, Id) of
+                    [#vertex{done = true, result = R}] ->
+                        {ok, R};
+                    _ ->
+                        error
+                end
+        end,
+    lists:foldl( fun(#tg_task{id = Id}, {N, Acc}) when Id =:= ParentTaskId ->
+                         {N, Acc};
+                    (Task, {N, Acc}) ->
+                         {ok, Pid} = task_graph_actor:start_link( EventMgr
+                                                                , Task
+                                                                , GetDepResult
+                                                                , Settings
+                                                                ),
+                         ets:insert_new(Tab, #vertex{ id = Task#tg_task.id
+                                                    , task = Task
+                                                    , pid = Pid
+                                                    }),
+                         {N + 1, [Pid|Acc]}
+                 end
+               , {0, []}
+               , Vertices
+               ).
+
+-spec do_add_edges(ets:tid(), task_graph:edges()) -> ok.
+do_add_edges(Tab, Edges) ->
+    lists:foreach( fun({From, To}) ->
+                           [Vtx = #vertex{pid = PFrom}] = ets:lookup(Tab, From),
+                           case is_task_complete(Vtx) of
+                               false ->
+                                   [#vertex{pid = PTo}] = ets:lookup(Tab, To),
+                                   task_graph_actor:add_consumer(PFrom, To, PTo),
+                                   task_graph_actor:add_requirement(PTo, From, PFrom);
+                               true ->
+                                   ok
+                           end
+                   end
+                 , Edges
+                 ).
+
+-spec is_acyclic(task_graph:digraph(), [task_graph:task_id()]) -> boolean().
+is_acyclic({Vertices, Edges}, NewIds) ->
+    DG = digraph:new(),
+    try
+        [digraph:add_vertex(DG, Id) || #tg_task{id = Id} <- Vertices],
+        [digraph:add_edge(DG, From, To)
+         || {From, To} <- Edges
+                        , map_sets:is_element(From, NewIds)
+        ],
+        digraph_utils:is_acyclic(DG)
+    after
+        digraph:delete(DG)
+    end.
+
+-spec is_task_complete(#vertex{}) -> boolean().
+is_task_complete(#vertex{result = R}) ->
+    R =/= undefined.
 
 complete_graph(State = #state{ parent = Parent
                              , success = Success

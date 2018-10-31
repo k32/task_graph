@@ -236,10 +236,11 @@ t_evt_draw_deps(_Config) ->
             ],
     Deps = [{"foo", 1}],
     {ok, _} = task_graph:run_graph(foo, Opts, {Tasks, Deps}),
+    %% TODO: Make it order-agnostic
     Bin = <<"digraph task_graph {\n"
             "preamble\n"
-            "  \"foo\"[color=green shape=oval];\n"
             "  1[color=green shape=oval];\n"
+            "  \"foo\"[color=green shape=oval];\n"
             "  \"foo\" -> 1;\n"
             "  dynamic[color=green shape=oval];\n"
             "  1 -> dynamic;\n"
