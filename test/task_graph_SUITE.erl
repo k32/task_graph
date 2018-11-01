@@ -18,6 +18,7 @@
         , t_guards/1
         , t_no_guards/1
         , t_proper_only/1
+        , t_keep_going/1
         ]).
 
 %% gen_event callbacks:
@@ -174,6 +175,22 @@ error_handling() ->
                                   ) orelse
                     error({Result, 'is not a subset of', ExpectedErrors})
             end)).
+
+t_keep_going(_Config) ->
+    N = 10,
+    Vertices = [ #tg_task{id = I, execute = test_worker, data = error}
+                 || I <- lists:seq(1, N)
+               ],
+    Edges = [],
+    Settings = #{ keep_going => true
+                , event_handlers => [send_back()]
+                },
+    {error, _} = task_graph:run_graph(foo, Settings, {Vertices, Edges}),
+    Events = collect_events(),
+    %% Assert:
+    N = length(events_of_kind([spawn_task], Events)),
+    ok.
+
 
 %% Check that resource constraints are respected
 t_resources(_Config) ->
