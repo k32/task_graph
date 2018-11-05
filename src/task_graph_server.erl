@@ -8,6 +8,7 @@
 -export([ run_graph/3
         , complete_task/4
         , extend_graph/3
+        , grab_resources/3
         , event/3
         , event/2
         , abort/2
@@ -66,7 +67,7 @@
                    | undefined
                    .
 
--define(TIMEOUT, 100).
+-define(TIMEOUT, infinity).
 
 %%%===================================================================
 %%% API
@@ -79,7 +80,7 @@
 -spec run_graph( atom()
                , task_graph:settings()
                , task_graph:digraph()
-               ) -> {ok, term()} | {error, term()}.
+               ) -> {ok, term()} | {error, term()} .
 run_graph(_, _, {[], _}) ->
     {ok, #{}};
 run_graph(TaskName, Settings, Tasks) ->
@@ -148,6 +149,11 @@ event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
 -spec abort(pid(), term()) -> ok.
 abort(Pid, Reason) ->
     gen_server:call(Pid, {abort, Reason}, ?TIMEOUT).
+
+-spec grab_resources(pid(), non_neg_integer(), non_neg_integer()) -> ok.
+grab_resources(Parent, Rank, ResourceMask) ->
+    From = self(),
+    gen_server:cast(Parent, {grab_resources, From, Rank, ResourceMask}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -263,8 +269,8 @@ do_extend_graph( {Vertices0, Edges}
     event(add_dependencies, Edges, EventMgr),
     case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
         ok ->
-            {NNew, Pids} = do_add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices),
-            do_add_edges(Tab, Edges),
+            {NNew, Pids} = add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices),
+            add_edges(Tab, Edges),
             lists:foreach(fun(Pid) -> task_graph_actor:launch(Pid) end, Pids),
             case ParentTaskId of
                 undefined ->
@@ -330,13 +336,13 @@ do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->
                  ),
     State#state{aborted = true}.
 
--spec do_add_vertices( ets:tid()
-                     , pid()
-                     , task_graph:settings()
-                     , task_graph:task_id()
-                     , [#tg_task{}]
-                     ) -> {non_neg_integer(), [pid()]}.
-do_add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices) ->
+-spec add_vertices( ets:tid()
+                  , pid()
+                  , task_graph:settings()
+                  , task_graph:task_id()
+                  , [#tg_task{}]
+                  ) -> {non_neg_integer(), [pid()]}.
+add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices) ->
     GetDepResult =
         fun(Id) ->
                 case ets:lookup(Tab, Id) of
@@ -364,8 +370,8 @@ do_add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices) ->
                , Vertices
                ).
 
--spec do_add_edges(ets:tid(), task_graph:edges()) -> ok.
-do_add_edges(Tab, Edges) ->
+-spec add_edges(ets:tid(), task_graph:edges()) -> ok.
+add_edges(Tab, Edges) ->
     lists:foreach( fun({From, To}) ->
                            [Vtx = #vertex{pid = PFrom}] = ets:lookup(Tab, From),
                            case is_task_complete(Vtx) of
