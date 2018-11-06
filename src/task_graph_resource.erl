@@ -34,7 +34,7 @@
 -type task_set() :: gb_sets:set(task_graph:task_id()).
 
 -spec is_empty(resources()) -> boolean().
-is_empty([]) ->
+is_empty(#{}) ->
   true;
 is_empty(A) when is_list(A) ->
   false.
@@ -141,10 +141,9 @@ pop_alloc_2([R0|Tail] = Exhausted, State, Acc) ->
   Next = gb_sets:next(gb_sets:iterator(S0)),
   pop_alloc_2(Exhausted, Tail, Next, State, Acc).
 
-
 pop_alloc_2(_, _, none, State, Acc) ->
   {Acc, State};
-pop_alloc_2(Exhausted, [], {Tid, Iter}, State0, Acc0) ->
+pop_alloc_2(_Exhausted0, [], {Tid, Iter}, State0, Acc0) ->
   {Resources, State1} = take_task(Tid, State0),
   State = alloc(State1, Resources),
   Exhausted = exhausted_resources(State),
@@ -205,7 +204,7 @@ take_task(Tid, State0 = #s{all_tasks = A0}) ->
 delete_task(Tid, State = #s{resources = RR, table = Tab}) ->
   lists:foreach( fun(RId) ->
                      [R] = ets:take(Tab, RId),
-                     E = gb_sets:del_element(RId, R#r.excl_tasks),
+                     E = gb_sets:del_element(Tid, R#r.excl_tasks),
                      ets:insert(Tab, R#r{ excl_tasks = E
                                         })
                  end

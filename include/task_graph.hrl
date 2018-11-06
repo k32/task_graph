@@ -6,6 +6,7 @@
         , execute        :: task_graph:task_execute()
         , data           :: term()
         , resources = [] :: [task_graph:resource_id()]
+                          | task_graph_resource:resources()
         }).
 
 -record(tg_event,

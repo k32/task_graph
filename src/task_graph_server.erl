@@ -8,7 +8,7 @@
 -export([ run_graph/3
         , complete_task/4
         , extend_graph/3
-        , grab_resources/3
+        , grab_resources/4
         , event/3
         , event/2
         , abort/2
@@ -24,6 +24,7 @@
 %% server state
 -record(state,
         { settings           :: task_graph:settings()
+        , resources          :: task_graph_resource:state()
         , tasks_table        :: ets:tid()
         , event_mgr          :: pid()
         , parent             :: pid()
@@ -132,12 +133,18 @@ complete_task(Pid, Id, Result, NewTasks) ->
     From = self(),
     gen_server:cast(Pid, {complete_task, From, Id, Result, NewTasks}).
 
+-spec extend_graph( pid()
+                  , task_graph:task_id()
+                  , task_graph:digraph()
+                  ) -> ok.
 extend_graph(Pid, ParentTask, G) ->
     gen_server:cast(Pid, {extend_graph, ParentTask, G}).
 
+-spec event(atom(), pid()) -> ok.
 event(Kind, EventMgr) ->
     event(Kind, undefined, EventMgr).
 
+-spec event(atom(), term(), pid()) -> ok.
 event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
     gen_event:notify( EventMgr
                     , #tg_event{ timestamp = erlang:system_time(?tg_timeUnit)
@@ -150,10 +157,13 @@ event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
 abort(Pid, Reason) ->
     gen_server:call(Pid, {abort, Reason}, ?TIMEOUT).
 
--spec grab_resources(pid(), non_neg_integer(), non_neg_integer()) -> ok.
-grab_resources(Parent, Rank, ResourceMask) ->
-    From = self(),
-    gen_server:cast(Parent, {grab_resources, From, Rank, ResourceMask}).
+-spec grab_resources( pid()
+                    , task_graph:task_id()
+                    , non_neg_integer()
+                    , task_graph_resource:resources()
+                    ) -> ok.
+grab_resources(Parent, Id, Rank, Resources) ->
+    gen_server:cast(Parent, {grab_resources, Id, Rank, Resources}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -162,9 +172,11 @@ grab_resources(Parent, Rank, ResourceMask) ->
 init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
     %% process_flag(trap_exit, true),
     ResourceLimits = maps:get(resources, Settings, #{}),
+    Resources = task_graph_resource:init_state(ResourceLimits),
     Tab = ets:new(TaskName, [{keypos, #vertex.id}, protected]),
     State = #state{ settings    = Settings
                   , tasks_table = Tab
+                  , resources   = Resources
                   , parent      = Parent
                   , event_mgr   = EventMgr
                   , n_left      = 0
@@ -207,6 +219,7 @@ handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, _}
 handle_cast( {complete_task, From, Id, {ok, Result}, NewTasks}
            , State0 = #state{ tasks_table = Tab
                             , n_left      = N
+                            , event_mgr   = EventMgr
                             }
            ) ->
     %% Assert:
@@ -217,7 +230,8 @@ handle_cast( {complete_task, From, Id, {ok, Result}, NewTasks}
     task_graph_actor:rip(From),
     State1 = State0#state{ n_left = N - 1
                          },
-    case do_extend_graph(NewTasks, undefined, State1) of
+    State2 = try_pop_tasks(free_resources(State1, Id)),
+    case do_extend_graph(NewTasks, undefined, State2) of
         {ok, State} ->
             case State#state.n_left of
                 0 -> %% It was the last task
@@ -235,6 +249,12 @@ handle_cast({extend_graph, ParentTask, G}, State) ->
         {stop, Err} ->
             {stop, Err, State}
     end;
+handle_cast({grab_resources, Id, Rank, Resources}, State0) ->
+    RState0 = State0#state.resources,
+    RState = task_graph_resource:push_task(RState0, Id, Resources),
+    State1 = State0#state{resources = RState},
+    State = try_pop_tasks(State1),
+    {noreply, State};
 handle_cast(_Cast, State) ->
     {noreply, State}.
 
@@ -260,6 +280,7 @@ do_extend_graph( {Vertices0, Edges}
                                , tasks_table = Tab
                                , n_left      = N0
                                , settings    = Settings
+                               , resources   = RState
                                }
                ) ->
     %% FIXME: `ParentTaskId == undefined' will create all kind of mess here...
@@ -269,7 +290,7 @@ do_extend_graph( {Vertices0, Edges}
     event(add_dependencies, Edges, EventMgr),
     case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
         ok ->
-            {NNew, Pids} = add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices),
+            {NNew, Pids} = add_vertices(Tab, EventMgr, Settings, RState, ParentTaskId, Vertices),
             add_edges(Tab, Edges),
             lists:foreach(fun(Pid) -> task_graph_actor:launch(Pid) end, Pids),
             case ParentTaskId of
@@ -327,6 +348,14 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
             {error, Err}
     end.
 
+-spec free_resources(#state{}, task_graph:task_id()) -> #state{}.
+free_resources(State, TaskId) ->
+    State.
+
+-spec try_pop_tasks(#state{}) -> #state{}.
+try_pop_tasks(State) ->
+    State.
+
 -spec do_abort_graph(term(), #state{}) -> #state{}.
 do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->
     lists:foreach( fun([_Id, Pid]) ->
@@ -339,10 +368,11 @@ do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->
 -spec add_vertices( ets:tid()
                   , pid()
                   , task_graph:settings()
+                  , task_graph_resource:state()
                   , task_graph:task_id()
                   , [#tg_task{}]
                   ) -> {non_neg_integer(), [pid()]}.
-add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices) ->
+add_vertices(Tab, EventMgr, Settings, RState, ParentTaskId, Vertices) ->
     GetDepResult =
         fun(Id) ->
                 case ets:lookup(Tab, Id) of
@@ -354,7 +384,13 @@ add_vertices(Tab, EventMgr, Settings, ParentTaskId, Vertices) ->
         end,
     lists:foldl( fun(#tg_task{id = Id}, {N, Acc}) when Id =:= ParentTaskId ->
                          {N, Acc};
-                    (Task, {N, Acc}) ->
+                    (Task0, {N, Acc}) ->
+                         Resources =
+                             task_graph_resource:to_resources( RState
+                                                             , Task0#tg_task.resources
+                                                             ),
+                         Task = Task0#tg_task{ resources = Resources
+                                             },
                          {ok, Pid} = task_graph_actor:start_link( EventMgr
                                                                 , Task
                                                                 , GetDepResult

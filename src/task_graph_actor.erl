@@ -12,6 +12,7 @@
         , add_requirement/3
         , launch/1
         , abort/2
+        , resources_acquired/1
         , rip/1
         ]).
 
@@ -26,8 +27,9 @@
         , exec_fun                   :: fun()
         , n_deps = 0                 :: non_neg_integer()
         , n_changed_deps = 0         :: non_neg_integer()
+        , rank = 0                   :: non_neg_integer() %% Fixme: calculate rank
         , guard_fun                  :: fun()
-        , resources                  :: [task_graph:resource_id()]
+        , resources                  :: task_graph_resource:resources()
         , parent                     :: pid()
         , event_mgr                  :: pid()
         , get_result_fun             :: task_graph_runner:get_deps_result()
@@ -69,6 +71,10 @@ abort(Pid, Reason) ->
 -spec rip(pid()) -> ok.
 rip(Pid) ->
     gen_statem:cast(Pid, rip).
+
+-spec resources_acquired(pid()) -> ok.
+resources_acquired(Pid) ->
+    gen_statem:cast(Pid, resources_acquired).
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -195,12 +201,31 @@ handle_event( cast
 handle_event(enter, _, wait_resources, Data) ->
     Action = {timeout, 0, check_resources},
     {next_state, wait_resources, Data, Action};
-handle_event(timeout, check_resources, wait_resources, Data) ->
+handle_event( timeout
+            , check_resources
+            , wait_resources
+            , #d{ id = Id
+                , resources = Resources
+                , parent = Parent
+                , rank = Rank
+                }
+            ) ->
+    case task_graph_resource:is_empty(Resources) of
+        true ->
+            %% No resources to allocate, skip call to Parent
+            resources_acquired(self());
+        false ->
+            task_graph_server:grab_resources(Parent, Id, Rank, Resources)
+    end,
+    keep_state_and_data;
+handle_event(cast, resources_acquired, wait_resources, Data) ->
     do_run_task(Data);
 
 %% Now when `task_graph_server' recorded our return value it's time to
 %% notify consumers:
 handle_event(cast, rip, complete, #d{epitaph = Epitaph, provides = Prov}) ->
+    %% Send task completion status (epitaph) to the downstream
+    %% dependencies:
     maps:map( fun(_Id, Pid) ->
                       gen_statem:cast(Pid, Epitaph)
               end

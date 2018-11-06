@@ -20,9 +20,9 @@
 -include_lib("task_graph/src/task_graph_int.hrl").
 -include_lib("stdlib/include/assert.hrl").
 
--define(TIMEOUT, 1200).
+-define(CT_TIMEOUT, 120).
 -define(NUMTESTS, 1000).
--define(SIZE, 1000).
+-define(SIZE, 500).
 
 -define(RUN_PROP(PROP, SIZE),
         begin
@@ -44,6 +44,10 @@
 
 -define(RUN_PROP(PROP), ?RUN_PROP(PROP, ?SIZE)).
 
+-define(MAX_RESOURCES, 10).
+
+-define(MAX_CAPACITY, 10).
+
 %%%===================================================================
 %%% Testcases and properties
 %%%===================================================================
@@ -57,6 +61,7 @@ resources() ->
        ?LET(Limits, resource_limits(),
             {Limits, tasks(Limits)}),
        begin
+           %%halp(),
            S0 = task_graph_resource:init_state(Limits),
            S1 = maps:fold( fun(Tid, RR0, State) ->
                                    RR = task_graph_resource:to_resources(S0, RR0),
@@ -101,28 +106,33 @@ resources_check(S0, Limits0, Tasks, Acc) ->
 %%% Proper generators
 %%%===================================================================
 task_id() ->
-    [range($a, $z)].
-
-resource_id() ->
     integer().
 
+resource_id() ->
+    range(255, 255 + ?MAX_RESOURCES).
+
 resource_limits() ->
-    ?LET(L, [{resource_id(), range(1, 10)}],
+    ?LET(L, list({resource_id(), range(1, ?MAX_CAPACITY)}),
          maps:from_list(L)).
 
-task_resources(Limits) ->
+task_resource(Limits) ->
     K = maps:keys(Limits),
-    frequency([ {1, resource_id()}
-              , {1, oneof(K)}
-              ]).
+    case K of
+        [] -> resource_id();
+        _ ->
+            frequency([ {1, resource_id()}
+                      , {1, oneof(K)}
+                      ])
+    end.
 
 task(Limits) ->
-    {task_id(), [task_resources(Limits)]}.
+    {task_id(), list(task_resource(Limits))}.
 
 tasks(Limits) ->
-    ?LET(L, [task(Limits)],
-         %% Stupid way of getting rid of duplicate keys:
-         maps:from_list(L)).
+    ?LET(L, list(task(Limits)),
+         begin
+             maps:from_list(L)
+         end).
 
 %%%===================================================================
 %%% Utility functions:
@@ -157,12 +167,20 @@ check_counters(Map) ->
     lists:all(fun(A) -> A >= 0 end, maps:values(Map))
         orelse error({'All counters should be non-negative, but got ', Map}).
 
+halp() ->
+    dbg:stop(),
+    io:format(user, "HALP!!!~n", []),
+    dbg:start(),
+    dbg:tracer(),
+    dbg:p(all, [c]),
+    dbg:tpl(task_graph_resource, []).
+
 %%%===================================================================
 %%% CT boilerplate
 %%%===================================================================
 
 suite() ->
-    [{timetrap,{seconds, ?TIMEOUT}}].
+    [{timetrap,{seconds, ?CT_TIMEOUT}}].
 
 init_per_testcase(_, Config) ->
     Config.
