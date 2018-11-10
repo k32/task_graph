@@ -1,1 +1,19 @@
+* 0.2.0
+** Performance improvements
+Task graph now uses completely different, faster locking mechanism in
+the BEAM VM.
+
+Memory consumption has been reduced.
+
+** "keep going" flag
+Added new =keep_going= flag that commands task graph to run all tasks
+even in presence of failures.
+
+** task_graph:abort
+It is now possible to abort graph execution gracefully using the new
+=task_graph:abort()= API.
+
+** guards now don't require resources
+Now the guard runs before the task acquires resources.
+
 * 0.1.0 Initial version
