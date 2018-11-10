@@ -8,13 +8,13 @@
 -include_lib("task_graph/include/task_graph.hrl").
 
 run_task(Ref, error, _GetDepsResult) ->
-    {error, oh_no_task_failed, Ref};
+    {error, {oh_no_task_failed, Ref}};
 run_task(Ref, exception, _GetDepsResult) ->
     error({oh_no_task_crashed, Ref});
 run_task(Ref, #{deps := Deps}, GetDepsResult) ->
     check_dep_results(Ref, GetDepsResult, Deps),
     {ok, {result, Ref}};
-run_task(_Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
+run_task(Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
     case Vertices of
         [#tg_task{id = T0}|_] ->
             case GetDepsResult(T0) of
@@ -23,7 +23,10 @@ run_task(_Ref, {deferred, {Vertices, Edges}}, GetDepsResult) ->
                     %% Tag all dependencies to avoid collision with
                     %% existing tasks
                     %% TODO: verify dependencies on the existsing tasks...
-                    {defer, {Vertices, Edges}};
+
+                    %% Add at least dependency to self to avoid data
+                    %% race in GetDepsResult:
+                    {defer, {Vertices, [{T0, Ref} | Edges]}};
                 _ ->
                     ok
             end;

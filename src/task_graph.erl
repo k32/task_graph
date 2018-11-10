@@ -11,11 +11,15 @@
 
 
 -export_type([ task/0
+             , edge/0
+             , edges/0
              , digraph/0
              , task_id/0
              , resource_id/0
              , task_execute/0
              , maybe/1
+             , settings_key/0
+             , settings/0
              ]).
 
 -type task_execute() :: atom() | task_runner:run().
@@ -28,13 +32,20 @@
 
 -type maybe(A) :: {just, A} | undefined.
 
--type digraph() :: {[task()], [{task_id(), task_id()}]}.
+-type edge() :: {task_id(), task_id()}.
+
+-type edges() :: [edge()].
+
+-type digraph() :: {[task()], edges()}.
 
 -type settings_key() :: event_manager
                       | event_handlers
                       | resources
                       | disable_guards
+                      | keep_going
                       .
+
+-type settings() :: #{settings_key() => term()}.
 
 %%--------------------------------------------------------------------
 %% @doc Execute task graph with default settings
@@ -68,6 +79,9 @@ run_graph(Name, Tasks) ->
 %%    `disable_guards' is a boolean flag that forces execution of all
 %%    tasks. (Similar to ```make -B``` flag)
 %%
+%%    `keep_going' is a boolean flag that allows all tasks to run even
+%%     in presense of errors. False by default
+%%
 %% `Tasks' is a 2-tuple containing vertices and edges of the task
 %% graph, respectively. Vertices are represented by a list of
 %% ```#tg_task{}``` records. Task ids should be unique. Edges is a
@@ -76,7 +90,7 @@ run_graph(Name, Tasks) ->
 %%
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
-               , #{settings_key() => term()}
+               , settings()
                , task_graph:digraph()
                ) -> {ok, term()} | {error, term()}.
 run_graph(Name, Settings, Tasks) ->

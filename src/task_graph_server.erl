@@ -6,21 +6,60 @@
 
 %% API
 -export([ run_graph/3
+        , complete_task/5
+        , extend_graph/3
+        , grab_resources/4
+        , event/3
+        , event/2
+        , abort/2
         ]).
+
+-export_type([ result_type/0
+             ]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
+%% server state
 -record(state,
-        { graph                            :: task_graph_digraph:digraph()
-        , event_mgr                        :: event_mgr()
-        , candidates = []                  :: [task_graph_digraph:candidate()]
-        , current_tasks = #{}              :: #{task_graph:task_id() => pid()}
-        , failed_tasks = #{}               :: #{task_graph:task_id() => term()}
-        , parent                           :: pid()
-        , guards                           :: boolean()
+        { settings           :: task_graph:settings()
+        , resources          :: task_graph_resource:state()
+        , tasks_table        :: ets:tid()
+        , event_mgr          :: pid()
+        , parent             :: pid()
+        , n_left             :: non_neg_integer()
+        , success = true     :: boolean()
+        , aborted = false    :: boolean()
         }).
+
+-record(vertex,
+        { id
+        , pid
+        , task
+        , done = false
+        , result
+        }).
+
+-define(FAILED_VERTEX,
+        { vertex
+        ,  _id    = '$1'
+        , _pid    = '_'
+        , _task   = '_'
+        , _done   = true
+        , _result = {error, '$2'}
+        }).
+
+-define(ACTIVE_VERTEX,
+        { vertex
+        ,  _id    = '$1'
+        , _pid    = '$2'
+        , _task   = '_'
+        , _done   = false
+        , _result = '_'
+        }).
+
+-type result_type() :: ok | error | aborted.
 
 -type event_mgr() :: atom()
                    | {atom(), atom()}
@@ -29,17 +68,22 @@
                    | undefined
                    .
 
+-define(TIMEOUT, infinity).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
 
 %%--------------------------------------------------------------------
 %% @doc
+%% @end
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
-               , #{task_graph:settings_key() => term()}
+               , task_graph:settings()
                , task_graph:digraph()
-               ) -> {ok, term()} | {error, term()}.
+               ) -> {ok, term()} | {error, term()} .
+run_graph(_, _, {[], _}) ->
+    {ok, #{}};
 run_graph(TaskName, Settings, Tasks) ->
     case maps:get(event_manager, Settings, undefined) of
         EventMgr when is_pid(EventMgr) ->
@@ -80,124 +124,152 @@ run_graph(TaskName, Settings, Tasks) ->
             Err
     end.
 
+-spec complete_task( pid()
+                   , task_graph:task_id()
+                   , {result_type(), term()}
+                   , task_graph_resource:resources()
+                   , task_graph:digraph() | undefined
+                   ) -> ok.
+complete_task(Pid, Id, Result, Resources, NewTasks) ->
+    From = self(),
+    gen_server:cast(Pid, {complete_task, From, Id, Result, Resources, NewTasks}).
+
+-spec extend_graph( pid()
+                  , task_graph:task_id()
+                  , task_graph:digraph()
+                  ) -> ok.
+extend_graph(Pid, ParentTask, G) ->
+    gen_server:cast(Pid, {extend_graph, ParentTask, G}).
+
+-spec event(atom(), pid()) -> ok.
+event(Kind, EventMgr) ->
+    event(Kind, undefined, EventMgr).
+
+-spec event(atom(), term(), pid()) -> ok.
+event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
+    gen_event:notify( EventMgr
+                    , #tg_event{ timestamp = erlang:system_time(?tg_timeUnit)
+                               , kind = Kind
+                               , data = Data
+                               }
+                    ).
+
+-spec abort(pid(), term()) -> ok.
+abort(Pid, Reason) ->
+    gen_server:call(Pid, {abort, Reason}, ?TIMEOUT).
+
+-spec grab_resources( pid()
+                    , task_graph:task_id()
+                    , non_neg_integer()
+                    , task_graph_resource:resources()
+                    ) -> ok.
+grab_resources(Parent, Id, Rank, Resources) ->
+    gen_server:cast(Parent, {grab_resources, Id, Rank, Resources}).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
 init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
+    %% process_flag(trap_exit, true),
     ResourceLimits = maps:get(resources, Settings, #{}),
-    Graph = task_graph_digraph:new_graph(TaskName, ResourceLimits),
-    try
-        ok = push_tasks(Tasks, Graph, EventMgr, undefined),
-        maybe_pop_tasks(),
-        {ok, #state{ graph = Graph
-                   , event_mgr = EventMgr
-                   , parent = Parent
-                   , guards = not maps:get(disable_guards, Settings, false)
-                   , candidates = task_graph_digraph:unlocked_tasks(Graph, #{})
-                   }}
-    catch
-        _:{badmatch, {error, circular_dependencies, Cycle}} ->
-            {stop, {topology_error, Cycle}}
-    end.
+    Resources = task_graph_resource:init_state(ResourceLimits),
+    Tab = ets:new(TaskName, [{keypos, #vertex.id}, protected]),
+    State = #state{ settings    = Settings
+                  , tasks_table = Tab
+                  , resources   = Resources
+                  , parent      = Parent
+                  , event_mgr   = EventMgr
+                  , n_left      = 0
+                  },
+    do_extend_graph(Tasks, undefined, State).
 
-handle_call(_Request, _From, State) ->
-    Reply = ok,
-    {reply, Reply, State}.
+handle_call({abort, Reason}, From, State0) ->
+    State = do_abort_graph(Reason, State0),
+    {reply, ok, State}.
 
-handle_cast({complete_task, Ref, _Success = false, _Changed, Return, _}, State) ->
-    maybe_pop_tasks(),
-    {noreply, push_error(Ref, Return, State)};
-handle_cast({complete_task, Ref, _Success = true, Changed, Return, NewTasks}, State) ->
-    #state{ candidates = OldCandidates
-          , current_tasks = Curr
-          , graph = G
-          } = State,
-    event(complete_task, Ref, State),
-    {ok, Unlocked} = task_graph_digraph:complete_task(G, Ref, Changed, Return),
-    State1 =
-        case push_tasks(NewTasks, State#state{graph = G}, undefined) of
-            ok ->
-                Candidates =
-                    case NewTasks of
-                        {[], []} ->
-                            merge_candidates(Unlocked, OldCandidates);
-                        _ ->
-                            %% TODO: Perhaps it's not necessary to do a full search
-                            task_graph_digraph:unlocked_tasks(G, Curr)
-                    end,
-                State#state{ current_tasks =
-                                 maps:remove(Ref, State#state.current_tasks)
-                           , candidates = Candidates
-                           };
-            Err ->
-                %% Dynamically added tasks are malformed or break the topology
-                push_error(Ref, Err, State)
-        end,
-    maybe_pop_tasks(),
-    {noreply, State1};
-handle_cast({defer_task, Ref, NewTasks}, State) ->
-    #state{ current_tasks = Curr0
-          , graph = G
-          } = State,
-    event(defer_task, Ref, State),
-    Curr = map_sets:del_element(Ref, Curr0),
-    State1 =
-        case push_tasks(NewTasks, State, {just, Ref}) of
-            ok ->
-                State#state{ current_tasks = Curr
-                           , candidates = task_graph_digraph:unlocked_tasks(G, Curr)
-                           };
-            Err ->
-                push_error(Ref, Err, State)
-        end,
-    maybe_pop_tasks(),
-    {noreply, State1};
-handle_cast(maybe_pop_tasks, State) ->
-    #state{ graph = G
-          , current_tasks = CurrentlyRunningTasks
-          , candidates = Candidates
-          } = State,
-    event(shed_begin, State),
-    case is_success(State) of
-        true ->
-            %% There are no failed tasks, proceed
-            {ok, NewCandidates, Tasks} =
-                task_graph_digraph:pre_schedule_tasks( G
-                                                     , Candidates
-                                                     );
-        false ->
-            %% Something's failed, don't schedule new tasks
-            Tasks = [],
-            NewCandidates = Candidates
-    end,
-    event(shed_end, State),
-    case Tasks of
-        [] ->
-            case is_complete(State) of
-                true ->
-                    %% Task graph
+%% Handle new errors and `aborted' state:
+handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, Resources, _}
+           , State0 = #state{ tasks_table = Tab
+                            , n_left      = N
+                            , settings    = Settings
+                            , aborted     = Aborted
+                            , resources   = Res0
+                            }
+           ) when ErrorType =:= error
+                ; ErrorType =:= aborted
+                ; Aborted   =:= true ->
+    %% Assert:
+    [Vertex0] = ets:lookup(Tab, Id),
+    ets:insert(Tab, Vertex0#vertex{ done   = true
+                                  , result = {ErrorType, ErrorMsg}
+                                  }),
+    Res1 = task_graph_resource:free(Res0, Resources),
+    task_graph_actor:rip(From),
+    KeepGoing = maps:get(keep_going, Settings, false),
+    State = State0#state{ n_left = N - 1
+                        , success = false
+                        , resources = Res1
+                        },
+    case {State#state.n_left, KeepGoing} of
+        {0, _} ->
+            complete_graph(State);
+        {_, true} ->
+            {noreply, State};
+        _ ->
+            {noreply, do_abort_graph(task_failed, State)}
+    end;
+%% Handle successful task completion:
+handle_cast( {complete_task, From, Id, {ok, Result}, Resources, NewTasks}
+           , State0 = #state{ tasks_table = Tab
+                            , n_left      = N
+                            , event_mgr   = EventMgr
+                            , resources   = Res0
+                            }
+           ) ->
+    %% Assert:
+    [Vertex0] = ets:lookup(Tab, Id),
+    ets:insert(Tab, Vertex0#vertex{ done   = true
+                                  , result = {ok, Result}
+                                  }),
+    Res1 = task_graph_resource:free(Res0, Resources),
+    task_graph_actor:rip(From),
+    State1 = State0#state{ n_left = N - 1
+                         , resources = Res1
+                         },
+    State2 = try_pop_tasks(free_resources(State1, Id)),
+    case do_extend_graph(NewTasks, undefined, State2) of
+        {ok, State} ->
+            case State#state.n_left of
+                0 -> %% It was the last task
                     complete_graph(State);
-                false ->
-                    %% All tasks have unresolved dependencies, wait
+                _ ->
                     {noreply, State}
             end;
-        _ ->
-            %% Schedule new tasks
-            State1 = State#state{ candidates = NewCandidates
-                                },
-            State2 = lists:foldl( fun run_task/2
-                                , State1
-                                , Tasks
-                                ),
-            {noreply, State2}
-    end.
+        {stop, Err} ->
+            {stop, {topology_error, Err}, State0}
+    end;
+handle_cast({extend_graph, ParentTask, G}, State) ->
+    case do_extend_graph(G, ParentTask, State) of
+        {ok, State1} ->
+            {noreply, State1};
+        {stop, Err} ->
+            {stop, Err, State}
+    end;
+handle_cast({grab_resources, Id, _Rank, Resources}, State0) ->
+    RState0 = State0#state.resources,
+    RState = task_graph_resource:push_task(RState0, Id, Resources),
+    State1 = State0#state{resources = RState},
+    State = try_pop_tasks(State1),
+    {noreply, State};
+handle_cast(_Cast, State) ->
+    {noreply, State}.
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, State) ->
-    task_graph_digraph:delete_graph(State#state.graph),
+    ets:delete(State#state.tasks_table),
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -207,241 +279,195 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--spec push_tasks( task_graph:digraph()
-                , #state{}
-                , task_graph:maybe(task_graph:task_id())
-                ) -> ok
-                   | {error, term()}.
-push_tasks(NewTasks, #state{graph = G, event_mgr = EventMgr}, Parent) ->
-    push_tasks(NewTasks, G, EventMgr, Parent).
-
-push_tasks({[], []}, _Graph, _, _) ->
-    ok;
-push_tasks(NewTasks = {Vertices, Edges}, G, EventMgr, Parent) ->
+do_extend_graph(undefined, _, State) ->
+    {ok, State};
+do_extend_graph( {Vertices0, Edges}
+               , ParentTaskId
+               , State = #state{ event_mgr   = EventMgr
+                               , tasks_table = Tab
+                               , n_left      = N0
+                               , settings    = Settings
+                               , resources   = RState
+                               }
+               ) ->
+    %% FIXME: `ParentTaskId == undefined' will create all kind of mess here...
     event(extend_begin, EventMgr),
+    Vertices = lists:usort(Vertices0),
     event(add_tasks, Vertices, EventMgr),
     event(add_dependencies, Edges, EventMgr),
-    Ret = task_graph_digraph:expand(G, NewTasks, Parent),
-    event(extend_end, EventMgr),
-    Ret.
+    case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
+        ok ->
+            {NNew, Pids} = add_vertices(Tab, EventMgr, Settings, RState, ParentTaskId, Vertices),
+            add_edges(Tab, Edges),
+            lists:foreach(fun(Pid) -> task_graph_actor:launch(Pid) end, Pids),
+            case ParentTaskId of
+                undefined ->
+                    ok;
+                _ ->
+                    task_graph_actor:launch(ets:lookup_element(Tab, ParentTaskId, #vertex.pid))
+            end,
+            event(extend_end, EventMgr),
+            {ok, State#state{ n_left = N0 + NNew
+                            }};
+        {error, Err} ->
+            {stop, {topology_error, Err}}
+    end.
 
-event(A, B) ->
-    event(A, undefined, B).
-event(Kind, Data, #state{event_mgr = EventMgr}) ->
-    event(Kind, Data, EventMgr);
-event(Kind, Data, EventMgr) when is_pid(EventMgr) ->
-    gen_event:notify( EventMgr
-                    , #tg_event{ timestamp = erlang:system_time(?tg_timeUnit)
-                               , kind = Kind
-                               , data = Data
-                               }
-                    ).
+do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
+    try
+        NewIds = map_sets:from_list([Id || #tg_task{id = Id} <- Vertices]),
+        IsValidId = fun(Id) ->
+                            { map_sets:is_element(Id, NewIds)
+                            , ets:member(Tab, Id)
+                            }
+                    end,
+        %% Check for duplicate tasks:
+        lists:foreach( fun(T = #tg_task{id = Id}) ->
+                               case ets:lookup(Tab, Id) of
+                                   [] ->
+                                       ok;
+                                   [#vertex{task = T}] ->
+                                       %% New task definition is the
+                                       %% same, I'll allow it
+                                       ok;
+                                   _ ->
+                                       throw({duplicate_task, Id})
+                               end
+                       end
+                     , Vertices
+                     ),
+        %% Check for invalid dependencies:
+        lists:foreach( fun({From, To}) ->
+                               {A, B} = IsValidId(From),
+                               A orelse B orelse throw({missing_dependency, From}),
+                               {C, D} = IsValidId(To),
+                               D andalso To =/= ParentTaskId andalso throw({time_paradox, From, To}),
+                               C orelse  To =:= ParentTaskId orelse throw({missing_consumer, To})
+                       end
+                     , Edges
+                     ),
+        %% Check topology of the new graph:
+        is_acyclic({Vertices, Edges}, NewIds) orelse
+            throw({circular_dependencies, []}),
+        ok
+    catch
+        Err ->
+            {error, Err}
+    end.
 
-complete_graph(State = #state{parent = Pid, failed_tasks = Failed}) ->
-    %% Assert:
-    #{} = State#state.current_tasks,
-    Result = case is_success(State) of
-                 true ->
-                     {ok, Failed};
-                 false ->
-                     {error, Failed}
-             end,
-    event(graph_complete, [self(), Result], State),
-    Pid ! {result, self(), Result},
-    {stop, normal, State}.
+-spec free_resources(#state{}, task_graph:task_id()) -> #state{}.
+free_resources(State, TaskId) ->
+    State.
 
-is_success(State) ->
-    maps:size(State#state.failed_tasks) == 0.
+-spec try_pop_tasks(#state{}) -> #state{}.
+try_pop_tasks(State = #state{resources = Res0, tasks_table = Tab}) ->
+    {Tasks, Res1} = task_graph_resource:pop_alloc(Res0),
+    lists:foreach( fun(TId) ->
+                           Pid = ets:lookup_element(Tab, TId, #vertex.pid),
+                           task_graph_actor:resources_acquired(Pid)
+                   end
+                 , Tasks
+                 ),
+    State#state{resources = Res1}.
 
-is_complete(State) ->
-    maps:size(State#state.current_tasks) == 0.
+-spec do_abort_graph(term(), #state{}) -> #state{}.
+do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->
+    lists:foreach( fun([_Id, Pid]) ->
+                           task_graph_actor:abort(Pid, Reason)
+                   end
+                 , ets:match(Tab, ?ACTIVE_VERTEX)
+                 ),
+    State#state{aborted = true}.
 
-push_error(Ref, Error, State) ->
-    OldFailedTasks = State#state.failed_tasks,
-    OldCurrentTasks = State#state.current_tasks,
-    event(task_failed, [Ref, Error], State),
-    State#state{ failed_tasks = OldFailedTasks#{Ref => Error}
-               , current_tasks = maps:remove(Ref, OldCurrentTasks)
-               }.
-
-maybe_pop_tasks() ->
-    gen_server:cast(self(), maybe_pop_tasks).
-
--spec complete_task( pid()
-                   , task_graph:task_id()
-                   , boolean()
-                   , boolean()
-                   , term()
-                   , task_graph:digraph()
-                   ) -> ok.
-complete_task(Parent, Ref, Success, Changed, Return, NewTasks) ->
-    gen_server:cast(Parent, {complete_task, Ref, Success, Changed, Return, NewTasks}).
-
--spec complete_task(pid(), task_graph:task_id(), boolean(), boolean(), term()) -> ok.
-complete_task(Parent, Ref, Success, Changed, Return) ->
-    complete_task(Parent, Ref, Success, Changed, Return, {[], []}).
-
--spec defer_task(pid(), task_graph:task_id(), task_graph:digraph()) -> ok.
-defer_task(Parent, Ref, NewTasks) ->
-    gen_server:cast(Parent, {defer_task, Ref, NewTasks}).
-
--spec run_task({task_graph:task(), boolean()}, #state{}) -> #state{}.
-run_task( {Task = #tg_task{id = Ref}, DepsUnchanged}
-        , State = #state{ current_tasks = TT
-                        , graph = G
-                        , guards = Guards
-                        }) ->
-    GetDepResult = fun(Ref1) ->
-                           task_graph_digraph:get_task_result(G, Ref1)
-                   end,
-    Pid = spawn_task( Task
-                    , State#state.event_mgr
-                    , GetDepResult
-                    , DepsUnchanged andalso Guards
-                    ),
-    State#state{current_tasks = TT#{Ref => Pid}}.
-
--spec spawn_task( task_graph:task()
-                , event_mgr()
-                , fun((task_graph:task_id()) -> {ok, term()} | error)
-                , boolean()
-                ) -> pid().
-spawn_task( Task = #tg_task{ id = Ref
-                           , execute = Exec
-                           }
-          , EventMgr
-          , GetDepResult
-          , DepsUnchanged
-          ) ->
-    Parent = self(),
-    case Exec of
-        _ when is_atom(Exec) ->
-            RunTaskFun = fun Exec:run_task/3,
-            GuardFun   = fun Exec:guard/3;
-        _ when is_function(Exec) ->
-            RunTaskFun = Exec,
-            GuardFun   = fun(_, _, _) -> changed end;
-        {RunTaskFun, GuardFun} when is_function(RunTaskFun)
-                                  , is_function(GuardFun) ->
-            ok;
-        _ ->
-            RunTaskFun = undefined, %% D'oh!
-            GuardFun = undefined,
-            error({badtask, Exec})
-    end,
-    spawn_link(
-      fun() ->
-              try
-                  Unchanged = DepsUnchanged andalso do_run_guard( Parent
-                                                                , EventMgr
-                                                                , GuardFun
+-spec add_vertices( ets:tid()
+                  , pid()
+                  , task_graph:settings()
+                  , task_graph_resource:state()
+                  , task_graph:task_id()
+                  , [#tg_task{}]
+                  ) -> {non_neg_integer(), [pid()]}.
+add_vertices(Tab, EventMgr, Settings, RState, ParentTaskId, Vertices) ->
+    GetDepResult =
+        fun(Id) ->
+                case ets:lookup(Tab, Id) of
+                    [#vertex{done = true, result = R}] ->
+                        {ok, R};
+                    _ ->
+                        error
+                end
+        end,
+    lists:foldl( fun(#tg_task{id = Id}, {N, Acc}) when Id =:= ParentTaskId ->
+                         {N, Acc};
+                    (Task0, {N, Acc}) ->
+                         Resources =
+                             task_graph_resource:to_resources( RState
+                                                             , Task0#tg_task.resources
+                                                             ),
+                         Task = Task0#tg_task{ resources = Resources
+                                             },
+                         {ok, Pid} = task_graph_actor:start_link( EventMgr
                                                                 , Task
                                                                 , GetDepResult
+                                                                , Settings
                                                                 ),
-                  if Unchanged ->
-                          ok;
-                     true ->
-                          do_run_task( Parent
-                                     , EventMgr
-                                     , RunTaskFun
-                                     , Task
-                                     , GetDepResult
-                                     )
-                  end
-              catch
-                  _:Err ?BIND_STACKTRACE(Stack) ->
-                      ?GET_STACKTRACE(Stack),
-                      complete_task( Parent
-                                   , Ref
-                                   , _success = false
-                                   , _changed = true
-                                   , {uncaught_exception, Err, Stack}
-                                   )
-              end
-      end).
+                         ets:insert_new(Tab, #vertex{ id = Task#tg_task.id
+                                                    , task = Task
+                                                    , pid = Pid
+                                                    }),
+                         {N + 1, [Pid|Acc]}
+                 end
+               , {0, []}
+               , Vertices
+               ).
 
--spec merge_candidates( [task_graph_digraph:candidate()]
-                      , [task_graph_digraph:candidate()]
-                      ) -> [task_graph_digraph:candidate()].
-merge_candidates(C1, C2) ->
-    C1 ++ C2.
+-spec add_edges(ets:tid(), task_graph:edges()) -> ok.
+add_edges(Tab, Edges) ->
+    lists:foreach( fun({From, To}) ->
+                           [Vtx = #vertex{pid = PFrom}] = ets:lookup(Tab, From),
+                           case is_task_complete(Vtx) of
+                               false ->
+                                   [#vertex{pid = PTo}] = ets:lookup(Tab, To),
+                                   task_graph_actor:add_consumer(PFrom, To, PTo),
+                                   task_graph_actor:add_requirement(PTo, From, PFrom);
+                               true ->
+                                   ok
+                           end
+                   end
+                 , Edges
+                 ).
 
--spec do_run_guard( pid()
-                  , pid()
-                  , fun()
-                  , task_graph:task()
-                  , task_runner:get_deps_result()
-                  ) -> boolean().
-do_run_guard( Parent
-            , EventMgr
-            , GuardFun
-            , #tg_task{ id = Ref
-                      , data = Data
-                      }
-            , GetDepResult
-            ) ->
-    event(run_guard, Ref, EventMgr),
-    Result = GuardFun(Ref, Data, GetDepResult),
-    event(guard_complete, Ref, EventMgr),
-    case Result of
-        unchanged ->
-            complete_task(Parent, Ref, true, false, undefined),
-            true;
-        {unchanged, Return} ->
-            complete_task(Parent, Ref, true, false, Return),
-            true;
-        changed ->
-            false
+-spec is_acyclic(task_graph:digraph(), [task_graph:task_id()]) -> boolean().
+is_acyclic({Vertices, Edges}, NewIds) ->
+    DG = digraph:new(),
+    try
+        [digraph:add_vertex(DG, Id) || #tg_task{id = Id} <- Vertices],
+        [digraph:add_edge(DG, From, To)
+         || {From, To} <- Edges
+                        , map_sets:is_element(From, NewIds)
+        ],
+        digraph_utils:is_acyclic(DG)
+    after
+        digraph:delete(DG)
     end.
 
--spec do_run_task( pid()
-                 , pid()
-                 , fun()
-                 , task_graph:task()
-                 , task_runner:get_deps_result()
-                 ) -> ok.
-do_run_task( Parent
-           , EventMgr
-           , RunTaskFun
-           , #tg_task{ id = Ref
-                     , data = Data
-                     }
-           , GetDepResult
-           ) ->
-    event(spawn_task, Ref, EventMgr),
-    Return = RunTaskFun(Ref, Data, GetDepResult),
-    case Return of
-        ok ->
-            complete_task( Parent
-                         , Ref
-                         , _success = true
-                         , _changed = true
-                         , undefined
-                         );
-        {ok, Result} ->
-            complete_task( Parent
-                         , Ref
-                         , _success = true
-                         , _changed = true
-                         , Result
-                         );
-        {ok, Result, NewTasks} ->
-            complete_task( Parent
-                         , Ref
-                         , _success = true
-                         , _changed = true
-                         , Result
-                         , NewTasks
-                         );
+-spec is_task_complete(#vertex{}) -> boolean().
+is_task_complete(#vertex{result = R}) ->
+    R =/= undefined.
 
-        {defer, NewTasks} ->
-            defer_task(Parent, Ref, NewTasks);
-
-        {error, Reason} ->
-            complete_task( Parent
-                         , Ref
-                         , _success = false
-                         , _changed = true
-                         , Reason
-                         )
-    end.
+complete_graph(State = #state{ parent = Parent
+                             , success = Success
+                             , tasks_table = Tab
+                             }
+              ) ->
+    Errors0 = ets:match(Tab, ?FAILED_VERTEX),
+    Errors = maps:from_list([{Id, Err} || [Id, Err] <- Errors0]),
+    ReturnValue = case Success of
+                      true ->
+                          %% Assert:
+                          Errors = #{},
+                          {ok, #{}};
+                      false ->
+                          {error, Errors}
+                  end,
+    Parent ! {result, self(), ReturnValue},
+    {stop, normal, State}.

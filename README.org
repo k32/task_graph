@@ -55,12 +55,12 @@ Basic usage:
 
 main() ->
     %% Define tasks:
-    Tasks = [#task{ id = I
-                  , execute = fun(MyId, MyData) ->
-                                  io:format("I'm ~p, doing ~p~n", [MyId, MyData])
-                              end,
-                  , data = something
-                  }
+    Tasks = [#tg_task{ id = I
+                     , execute = fun(MyId, MyData) ->
+                                     io:format("I'm ~p, doing ~p~n", [MyId, MyData])
+                                 end,
+                     , data = something
+                     }
              || I <- lists:seq(1, 4)],
     %% Define dependnecies ({A, B} reads as "B depends on A"):
     Edges = [{1, 2}, {1, 3}, {2, 3}, {2, 4}],
@@ -91,14 +91,14 @@ How to emulate =make -j N= flag using =resources=:
 
 #+BEGIN_SRC erlang
 %% Define tasks:
-Tasks = [#task{ id = I
-              , execute = fun(MyId, MyData) ->
-                              io:format("I'm ~p, doing ~p~n", [MyId, MyData])
-                          end,
-              , data = something
-              %% Demand `jobs' resource:
-              , resources = [jobs]
-              }
+Tasks = [#tg_task{ id = I
+                 , execute = fun(MyId, MyData) ->
+                                 io:format("I'm ~p, doing ~p~n", [MyId, MyData])
+                             end,
+                 , data = something
+                 %% Demand `jobs' resource:
+                 , resources = [jobs]
+                 }
          || I <- lists:seq(1, 4)],
 %% Specify resource capacity:
 Settings = #{resources => #{jobs => 3}},

@@ -18,6 +18,7 @@
         , t_guards/1
         , t_no_guards/1
         , t_proper_only/1
+        , t_keep_going/1
         ]).
 
 %% gen_event callbacks:
@@ -63,7 +64,7 @@
                                         ]
                                       ),
             group_leader(OldGL, self()),
-            analyse_statistics(),
+            catch analyse_statistics(),
             T1 = erlang:system_time(?tg_timeUnit),
             io:format(user, "Testcase ran for ~p ms~n", [T1 - T0]),
             true = Result
@@ -171,8 +172,25 @@ error_handling() ->
                 {error, Result} = task_graph:run_graph(foo, DAG),
                 map_sets:is_subset( Result
                                   , map_sets:from_list(ExpectedErrors)
-                                  )
+                                  ) orelse
+                    error({Result, 'is not a subset of', ExpectedErrors})
             end)).
+
+t_keep_going(_Config) ->
+    N = 10,
+    Vertices = [ #tg_task{id = I, execute = test_worker, data = error}
+                 || I <- lists:seq(1, N)
+               ],
+    Edges = [],
+    Settings = #{ keep_going => true
+                , event_handlers => [send_back()]
+                },
+    {error, _} = task_graph:run_graph(foo, Settings, {Vertices, Edges}),
+    Events = collect_events(),
+    %% Assert:
+    N = length(events_of_kind([spawn_task], Events)),
+    ok.
+
 
 %% Check that resource constraints are respected
 t_resources(_Config) ->
@@ -235,10 +253,11 @@ t_evt_draw_deps(_Config) ->
             ],
     Deps = [{"foo", 1}],
     {ok, _} = task_graph:run_graph(foo, Opts, {Tasks, Deps}),
+    %% TODO: Make it order-agnostic
     Bin = <<"digraph task_graph {\n"
             "preamble\n"
-            "  \"foo\"[color=green shape=oval];\n"
             "  1[color=green shape=oval];\n"
+            "  \"foo\"[color=green shape=oval];\n"
             "  \"foo\" -> 1;\n"
             "  dynamic[color=green shape=oval];\n"
             "  1 -> dynamic;\n"
@@ -491,8 +510,12 @@ check_topology(Tasks, Events) ->
                                    ),
     %% Check that all tasks have been executed exactly once:
     lists:foreach( fun(Key) ->
-                           Val = maps:get(Key, RanTimes),
-                           1 == Val orelse error({'Task', Key, 'ran', Val, 'times instead of 1'})
+                           Val = maps:get(Key, RanTimes, 0),
+                           1 == Val orelse
+                               begin
+                                   io:format(user, "Events: ~p~n", [Events]),
+                                   error({'Task', Key, 'ran', Val, 'times instead of 1'})
+                               end
                    end
                  , maps:keys(Tasks)
                  ),
@@ -569,6 +592,15 @@ is_task_changed(Id, Tasks) ->
         _ ->
             true
     end.
+
+halp() ->
+    dbg:stop(),
+    io:format(user, "HALP!!!~n", []),
+    dbg:start(),
+    dbg:tracer(),
+    dbg:p(new_processes, [c]),
+    dbg:tpl(task_graph_actor, []),
+    dbg:tpl(task_graph_server, []).
 
 %%%===================================================================
 %%% gen_event boilerplate
