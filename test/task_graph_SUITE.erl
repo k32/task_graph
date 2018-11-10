@@ -13,7 +13,7 @@
         , t_topology_succ/1
         , t_topology/1
         , t_error_handling/1
-        %, t_resources/1
+        , t_resources/1
         , t_deferred/1
         , t_guards/1
         , t_no_guards/1

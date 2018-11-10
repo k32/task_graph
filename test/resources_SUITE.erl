@@ -21,7 +21,7 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -define(CT_TIMEOUT, 120).
--define(NUMTESTS, 1000).
+-define(NUMTESTS, 100).
 -define(SIZE, 500).
 
 -define(RUN_PROP(PROP, SIZE),
@@ -61,7 +61,6 @@ resources() ->
        ?LET(Limits, resource_limits(),
             {Limits, tasks(Limits)}),
        begin
-           %%halp(),
            S0 = task_graph_resource:init_state(Limits),
            S1 = maps:fold( fun(Tid, RR0, State) ->
                                    RR = task_graph_resource:to_resources(S0, RR0),
@@ -79,7 +78,7 @@ resources() ->
 
 resources_check(S0, Limits0, Tasks, Acc) ->
     {Candidates, S1} = task_graph_resource:pop_alloc(S0),
-    {[], S1} = task_graph_resource:pop_alloc(S1),
+    {[], S2} = task_graph_resource:pop_alloc(S1),
     CounterKeys = lists:append([lists:usort(maps:get(I, Tasks)) || I <- Candidates]),
     Limits1 = dec_counters(CounterKeys, Limits0),
     check_counters(Limits1),
@@ -91,7 +90,7 @@ resources_check(S0, Limits0, Tasks, Acc) ->
                                , lists:usort(RR) ++ Counters
                                }
                        end
-                     , {S1, []}
+                     , {S2, []}
                      , Candidates
                      ),
     Limits = inc_counters(CounterKeys2, Limits1),
@@ -99,7 +98,7 @@ resources_check(S0, Limits0, Tasks, Acc) ->
         [] ->
             Acc;
         _ ->
-            resources_check(S, Limits, Tasks, Candidates ++ Acc)
+            resources_check(S, Limits0, Tasks, Candidates ++ Acc)
     end.
 
 %%%===================================================================
@@ -183,9 +182,13 @@ suite() ->
     [{timetrap,{seconds, ?CT_TIMEOUT}}].
 
 init_per_testcase(_, Config) ->
+    fprof:start(),
     Config.
 
 end_per_testcase(_, Config) ->
+    fprof:profile(),
+    fprof:analyse([{dest, []}]),
+    fprof:stop(),
     Config.
 
 all() ->

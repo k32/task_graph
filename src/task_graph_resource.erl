@@ -13,203 +13,144 @@
         , show_state/1
         ]).
 
--record(s,
-        { table :: ets:tid()
-        , resources :: [reference()]
-        , name_map :: #{task_graph:resource_id() => reference()}
-        , all_tasks :: gb_trees:tree(task_graph:task_id(), resources())
-        , exhausted_resources :: [reference()]
+-include_lib("stdlib/include/ms_transform.hrl").
+
+-opaque resources() :: non_neg_integer().
+
+-record(task,
+        { id :: task_graph:task_id()
+        , rmask :: resources()
         }).
 
--record(r,
-        { id :: reference()
+-record(resource,
+        { bitpos :: non_neg_integer()
         , quantity :: non_neg_integer()
-        , excl_tasks :: task_set() %% Tasks that DO NOT depend on this resource
+        , resource_id :: task_graph:resource_id()
         }).
 
--opaque resources() :: map_sets:set(reference()).
+-record(s,
+        { tasks :: [#task{}]
+        , resources :: ets:tid()
+        , exhausted_resources :: resources()
+        , all_exhausted :: non_neg_integer()
+        }).
 
 -opaque state() :: #s{}.
 
--type task_set() :: gb_sets:set(task_graph:task_id()).
-
 -spec is_empty(resources()) -> boolean().
-is_empty(#{}) ->
+is_empty(0) ->
   true;
-is_empty(A) when is_list(A) ->
+is_empty(A) when is_integer(A) ->
   false.
 
 -spec init_state(#{task_graph:resource_id() => non_neg_integer()}) -> state().
 init_state(RR) ->
-  Tab = ets:new(resources_tab, [{keypos, #r.id}]),
-  NameMap = maps:fold( fun(K, V, Acc) when is_integer(V), V > 0 ->
-                           Ref = make_ref(),
-                           ets:insert(Tab, #r{ id = Ref
-                                             , quantity = V
-                                             , excl_tasks = gb_sets:new()
-                                             }),
-                           Acc#{K => Ref};
-                          (K, V, _) ->
-                           error({badresource, K, V})
-                       end
-                     , #{}
-                     , RR
-                     ),
-  %% TODO: Optimize order to filter out tasks faster
-  Resources = maps:values(NameMap),
-  #s{ table = Tab
-    , name_map = NameMap
-    , resources = Resources
-    , all_tasks = gb_trees:empty()
-    , exhausted_resources = []
-    }.
+    Tab = ets:new(resources, [{keypos, #resource.bitpos}, private]),
+    PMax = maps:fold( fun(K, V, Acc) when is_integer(V), V > 0 ->
+                              ets:insert(Tab, #resource{ bitpos = Acc
+                                                       , quantity = V
+                                                       , resource_id = K
+                                                       }),
+                              Acc + 1;
+                         (K, V, _) ->
+                              error({badresource, K, V})
+                      end
+                    , 0
+                    , RR
+                    ),
+    #s{ tasks = []
+      , resources = Tab
+      , exhausted_resources = 0
+      , all_exhausted = max(1 bsl PMax - 1, 1)
+      }.
 
 -spec to_resources(state(), [task_graph:resource_id()]) -> resources().
-to_resources(#s{name_map = M}, RR) ->
-  map_sets:from_list(
-    lists:filtermap( fun(K) ->
-                             case M of
-                                 #{K := V} -> {true, V};
-                                 _ -> false
-                             end
-                     end
-                   , lists:usort(RR)
-                   )).
+to_resources(#s{resources = Tab}, RR) ->
+    RMap = map_sets:from_list(RR),
+    ets:foldl( fun(#resource{resource_id = RId, bitpos = P}, Acc) ->
+                       case map_sets:is_element(RId, RMap) of
+                           true ->
+                               Acc bor (1 bsl P);
+                           false ->
+                               Acc
+                       end
+               end
+             , 0
+             , Tab
+             ).
 
 -spec push_task(state(), task_graph:task_id(), resources()) -> state().
-push_task(State = #s{table = Tab, resources = RL, all_tasks = AllTasks0}, TaskId, RR) ->
-  lists:foreach( fun(I) ->
-                     case map_sets:is_element(I, RR) of
-                       false ->
-                         [Obj] = ets:lookup(Tab, I),
-                         Set = gb_sets:add_element(TaskId, Obj#r.excl_tasks),
-                         ets:insert(Tab, Obj#r{ excl_tasks = Set
-                                              });
-                       true ->
-                         ok
-                     end
-                 end
-               , RL
-               ),
-  AllTasks = gb_trees:insert(TaskId, RR, AllTasks0),
-  State#s{all_tasks = AllTasks}.
+push_task(State = #s{tasks = Tasks0}, TaskId, RR) ->
+    Tasks = [#task{ id = TaskId
+                  , rmask = RR
+                  }|Tasks0],
+    State#s{tasks = Tasks}.
 
 -spec free(state(), resources()) -> state().
-free(#s{table = Tab, exhausted_resources = E0} = State, Resources) ->
-  E = map_sets:fold( fun(Key, Acc) ->
-                       ets:update_counter(Tab, Key, {#r.quantity, 1}),
-                       lists:delete(Key, Acc)
-                     end
-                   , E0
-                   , Resources
-                   ),
-  State#s{exhausted_resources = E}.
+free(#s{resources = Tab, exhausted_resources = E0} = State, Resources) ->
+    update_counters(Tab, Resources, 1),
+    E = E0 band (bnot Resources),
+    State#s{exhausted_resources = E}.
 
-show_state(#s{table = Tab}) ->
-  io_lib:format("~p", [ets:tab2list(Tab)]).
+-spec show_state(state()) -> iolist().
+show_state(#s{resources = RR, tasks = TT, exhausted_resources = E}) ->
+    io_lib:format("~p", [#{ resources => ets:tab2list(RR)
+                          , tasks => TT
+                          , exhausted_resources => E
+                          }]).
 
 -spec pop_alloc(state()) -> {[task_graph:task_id()], state()}.
-pop_alloc(State) ->
-  pop_alloc(State, []).
+pop_alloc(State0 = #s{tasks = T0}) ->
+    pop_alloc(State0#s{tasks = []}, T0, []).
 
-pop_alloc(State0, Acc) ->
-  Exhausted = exhausted_resources(State0),
-  NumExhausted = length(Exhausted),
-  NumResources = maps:size(State0#s.name_map),
-  AllTasks0 = State0#s.all_tasks,
-  case {NumExhausted, gb_trees:is_empty(AllTasks0)} of
-    {0, false} ->
-      %% All resources are available; alloc immediately
-      {TaskId, Resources, AllTasks} = gb_trees:take_smallest(AllTasks0),
-      State = alloc(State0#s{all_tasks = AllTasks}, Resources),
-      delete_task(TaskId, State),
-      pop_alloc(State, [TaskId|Acc]);
-    {NumResources, _} ->
-      %% No need to run search: all resources have been used up
-      {Acc, State0};
-    {_, false} when NumExhausted < NumResources ->
-      %% Some resources are exhausted, search for tasks that don't use
-      %% them:
-      pop_alloc_2(Exhausted, State0, Acc);
-    {_, true} ->
-      %% No tasks left
-      {Acc, State0}
-  end.
+pop_alloc(State, [], Acc) ->
+    {Acc, State};
+pop_alloc( State0 = #s{ all_exhausted = E
+                      , exhausted_resources = E
+                      , tasks = T0
+                      }
+         , Tail
+         , Acc
+         ) ->
+    {Acc, State0#s{tasks = Tail ++ T0}};
+pop_alloc(State0, [Task | Tail], Acc) ->
+    #s{ exhausted_resources = E0
+      , tasks = T0
+      } = State0,
+    #task{ id = TId
+         , rmask = Resources
+         } = Task,
+    case E0 band Resources of
+        0 ->
+            State = alloc(State0, Resources),
+            pop_alloc(State, Tail, [TId|Acc]);
+        _ ->
+            State = State0#s{tasks = [Task|T0]},
+            pop_alloc(State, Tail, Acc)
+    end.
 
-pop_alloc_2([R0|Tail] = Exhausted, State, Acc) ->
-  S0 = get_excl_tasks(R0, State),
-  Next = gb_sets:next(gb_sets:iterator(S0)),
-  pop_alloc_2(Exhausted, Tail, Next, State, Acc).
+alloc(#s{resources = Tab, exhausted_resources = E0} = State, Resources) ->
+    E1 = update_counters(Tab, Resources, -1),
+    %% Assert:
+    0 = E0 band E1,
+    State#s{exhausted_resources = E0 bor E1}.
 
-pop_alloc_2(_, _, none, State, Acc) ->
-  {Acc, State};
-pop_alloc_2(_Exhausted0, [], {Tid, Iter}, State0, Acc0) ->
-  {Resources, State1} = take_task(Tid, State0),
-  State = alloc(State1, Resources),
-  Exhausted = exhausted_resources(State),
-  Acc = [Tid|Acc0],
-  pop_alloc_2( Exhausted
-             , Exhausted
-             , gb_sets:next(Iter)
-             , State
-             , Acc
-             );
-pop_alloc_2(Exhausted, [R1|Tail], {Tid, _Iter0}, State, Acc) ->
-  S1 = get_excl_tasks(R1, State),
-  Iter1 = gb_sets:iterator_from(Tid, S1),
-  case gb_sets:next(Iter1) of
-    {Tid, Iter} ->
-      pop_alloc_2( Exhausted
-                 , Tail
-                 , {Tid, Iter}
-                 , State
-                 , Acc
-                 );
-    {OtherTid, Iter} ->
-      %% TODO: we check R1 twice, this perhaps could be avoided
-      pop_alloc_2( Exhausted
-                 , Exhausted
-                 , {OtherTid, Iter}
-                 , State
-                 , Acc
-                 );
-    none ->
-      {Acc, State}
-  end.
+update_counters(Tab, Resources, Delta) ->
+    update_counters(Tab, Resources, Delta, 0, 0).
 
-get_excl_tasks(R, #s{table = Tab}) ->
-  ets:lookup_element(Tab, R, #r.excl_tasks).
-
-alloc(#s{table = Tab, exhausted_resources = E0} = State, Resources) ->
-  E1 = lists:foldl( fun(Key, Acc) ->
-                        Val = ets:update_counter(Tab, Key, {#r.quantity, -1}),
-                        case Val of
-                          0 ->
-                            [Key|Acc];
-                          _ ->
-                            Acc
-                        end
-                    end
-                  , []
-                  , map_sets:to_list(Resources)
-                  ),
-  State#s{exhausted_resources = E0 ++ E1}.
-
-take_task(Tid, State0 = #s{all_tasks = A0}) ->
-  Resources = gb_trees:get(Tid, A0),
-  delete_task(Tid, State0),
-  State = State0#s{all_tasks = gb_trees:delete(Tid, A0)},
-  {Resources, State}.
-
-delete_task(Tid, State = #s{resources = RR, table = Tab}) ->
-  lists:foreach( fun(RId) ->
-                     [R] = ets:take(Tab, RId),
-                     E = gb_sets:del_element(Tid, R#r.excl_tasks),
-                     ets:insert(Tab, R#r{ excl_tasks = E
-                                        })
-                 end
-               , RR
-               ).
-
-exhausted_resources(#s{exhausted_resources = E}) ->
-  E.
+update_counters(_, 0, _, _, Acc) ->
+    Acc;
+update_counters(Tab, Resources, Delta, BPos, Acc0) ->
+    Acc =
+        case Resources band 1 of
+            1 ->
+                case ets:update_counter(Tab, BPos, {#resource.quantity, Delta}) of
+                    0 ->
+                        Acc0 bor (1 bsl BPos);
+                    _ ->
+                        Acc0
+                end;
+            0 ->
+                Acc0
+        end,
+    update_counters(Tab, Resources bsr 1, Delta, BPos + 1, Acc).

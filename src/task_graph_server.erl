@@ -6,7 +6,7 @@
 
 %% API
 -export([ run_graph/3
-        , complete_task/4
+        , complete_task/5
         , extend_graph/3
         , grab_resources/4
         , event/3
@@ -127,11 +127,12 @@ run_graph(TaskName, Settings, Tasks) ->
 -spec complete_task( pid()
                    , task_graph:task_id()
                    , {result_type(), term()}
+                   , task_graph_resource:resources()
                    , task_graph:digraph() | undefined
                    ) -> ok.
-complete_task(Pid, Id, Result, NewTasks) ->
+complete_task(Pid, Id, Result, Resources, NewTasks) ->
     From = self(),
-    gen_server:cast(Pid, {complete_task, From, Id, Result, NewTasks}).
+    gen_server:cast(Pid, {complete_task, From, Id, Result, Resources, NewTasks}).
 
 -spec extend_graph( pid()
                   , task_graph:task_id()
@@ -188,11 +189,12 @@ handle_call({abort, Reason}, From, State0) ->
     {reply, ok, State}.
 
 %% Handle new errors and `aborted' state:
-handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, _}
+handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, Resources, _}
            , State0 = #state{ tasks_table = Tab
                             , n_left      = N
                             , settings    = Settings
                             , aborted     = Aborted
+                            , resources   = Res0
                             }
            ) when ErrorType =:= error
                 ; ErrorType =:= aborted
@@ -202,10 +204,12 @@ handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, _}
     ets:insert(Tab, Vertex0#vertex{ done   = true
                                   , result = {ErrorType, ErrorMsg}
                                   }),
+    Res1 = task_graph_resource:free(Res0, Resources),
     task_graph_actor:rip(From),
     KeepGoing = maps:get(keep_going, Settings, false),
     State = State0#state{ n_left = N - 1
                         , success = false
+                        , resources = Res1
                         },
     case {State#state.n_left, KeepGoing} of
         {0, _} ->
@@ -216,10 +220,11 @@ handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, _}
             {noreply, do_abort_graph(task_failed, State)}
     end;
 %% Handle successful task completion:
-handle_cast( {complete_task, From, Id, {ok, Result}, NewTasks}
+handle_cast( {complete_task, From, Id, {ok, Result}, Resources, NewTasks}
            , State0 = #state{ tasks_table = Tab
                             , n_left      = N
                             , event_mgr   = EventMgr
+                            , resources   = Res0
                             }
            ) ->
     %% Assert:
@@ -227,8 +232,10 @@ handle_cast( {complete_task, From, Id, {ok, Result}, NewTasks}
     ets:insert(Tab, Vertex0#vertex{ done   = true
                                   , result = {ok, Result}
                                   }),
+    Res1 = task_graph_resource:free(Res0, Resources),
     task_graph_actor:rip(From),
     State1 = State0#state{ n_left = N - 1
+                         , resources = Res1
                          },
     State2 = try_pop_tasks(free_resources(State1, Id)),
     case do_extend_graph(NewTasks, undefined, State2) of
@@ -249,7 +256,7 @@ handle_cast({extend_graph, ParentTask, G}, State) ->
         {stop, Err} ->
             {stop, Err, State}
     end;
-handle_cast({grab_resources, Id, Rank, Resources}, State0) ->
+handle_cast({grab_resources, Id, _Rank, Resources}, State0) ->
     RState0 = State0#state.resources,
     RState = task_graph_resource:push_task(RState0, Id, Resources),
     State1 = State0#state{resources = RState},
@@ -353,8 +360,15 @@ free_resources(State, TaskId) ->
     State.
 
 -spec try_pop_tasks(#state{}) -> #state{}.
-try_pop_tasks(State) ->
-    State.
+try_pop_tasks(State = #state{resources = Res0, tasks_table = Tab}) ->
+    {Tasks, Res1} = task_graph_resource:pop_alloc(Res0),
+    lists:foreach( fun(TId) ->
+                           Pid = ets:lookup_element(Tab, TId, #vertex.pid),
+                           task_graph_actor:resources_acquired(Pid)
+                   end
+                 , Tasks
+                 ),
+    State#state{resources = Res1}.
 
 -spec do_abort_graph(term(), #state{}) -> #state{}.
 do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->

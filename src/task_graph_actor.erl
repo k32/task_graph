@@ -356,25 +356,27 @@ do_run_task( Data = #d{ id             = Ref
 complete_task(Data = #d{ id        = Id
                        , parent    = Parent
                        , event_mgr = EventMgr
+                       , resources = Resources
                        }
              , {ok, Result}
              , Changed
              , NewTasks
              ) ->
     Changed andalso event(complete_task, Id, EventMgr),
-    task_graph_server:complete_task(Parent, Id, {ok, Result}, NewTasks),
+    task_graph_server:complete_task(Parent, Id, {ok, Result}, Resources, NewTasks),
     Epitaph = {dep_complete, Id, not Changed},
     {next_state, complete, Data#d{ epitaph = Epitaph }};
 complete_task(Data = #d{ id        = Id
                        , parent    = Parent
                        , event_mgr = EventMgr
+                       , resources = Resources
                        }
              , {ReturnType, Error}
              , _Changed
              , _NewTasks
              ) ->
     event(task_failed, [Id, Error], EventMgr),
-    task_graph_server:complete_task(Parent, Id, {ReturnType, Error}, undefined),
+    task_graph_server:complete_task(Parent, Id, {ReturnType, Error}, Resources, undefined),
     {next_state, complete, Data#d{ epitaph = {dep_failed, Id}
                                  }}.
 
