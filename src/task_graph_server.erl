@@ -14,9 +14,6 @@
         , abort/2
         ]).
 
--export_type([ result_type/0
-             ]).
-
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
@@ -34,12 +31,16 @@
         }).
 
 -record(vertex,
-        { id
-        , pid
-        , task
-        , done = false
-        , result
+        { id                 :: task_graph:task_id()
+        , pid                :: pid()
+        , task               :: #tg_task{}
+        , done = false       :: boolean()
+        , result             :: undefined | {task_graph:result_type(), term()}
         }).
+
+-type task_result() :: { task_graph:task_id()
+                       , {task_graph:result_type(), term()}
+                       }.
 
 -define(FAILED_VERTEX,
         { vertex
@@ -58,8 +59,6 @@
         , _done   = false
         , _result = '_'
         }).
-
--type result_type() :: ok | error | aborted.
 
 -type event_mgr() :: atom()
                    | {atom(), atom()}
@@ -126,7 +125,7 @@ run_graph(TaskName, Settings, Tasks) ->
 
 -spec complete_task( pid()
                    , task_graph:task_id()
-                   , {result_type(), term()}
+                   , {task_graph:result_type(), term()}
                    , task_graph_resource:resources()
                    , task_graph:digraph() | undefined
                    ) -> ok.
@@ -297,7 +296,7 @@ do_extend_graph( {Vertices0, Edges}
     event(add_dependencies, Edges, EventMgr),
     case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
         ok ->
-            {NNew, Pids} = add_vertices(Tab, EventMgr, Settings, RState, ParentTaskId, Vertices),
+            {NNew, Pids} = add_vertices(State, ParentTaskId, Vertices),
             add_edges(Tab, Edges),
             lists:foreach(fun(Pid) -> task_graph_actor:launch(Pid) end, Pids),
             case ParentTaskId of
@@ -379,14 +378,16 @@ do_abort_graph(Reason, State = #state{tasks_table = Tab}) ->
                  ),
     State#state{aborted = true}.
 
--spec add_vertices( ets:tid()
-                  , pid()
-                  , task_graph:settings()
-                  , task_graph_resource:state()
+-spec add_vertices( #state{}
                   , task_graph:task_id()
                   , [#tg_task{}]
                   ) -> {non_neg_integer(), [pid()]}.
-add_vertices(Tab, EventMgr, Settings, RState, ParentTaskId, Vertices) ->
+add_vertices(State, ParentTaskId, Vertices) ->
+    #state{ tasks_table = Tab
+          , event_mgr = EventMgr
+          , settings = Settings
+          , resources = RState
+          } = State,
     GetDepResult =
         fun(Id) ->
                 case ets:lookup(Tab, Id) of
