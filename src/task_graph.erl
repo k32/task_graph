@@ -32,6 +32,8 @@
 
 -type maybe(A) :: {just, A} | undefined.
 
+-type result_type() :: ok | error | aborted.
+
 -type edge() :: {task_id(), task_id()}.
 
 -type edges() :: [edge()].
