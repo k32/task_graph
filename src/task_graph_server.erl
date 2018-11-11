@@ -6,6 +6,7 @@
 
 %% API
 -export([ run_graph/3
+        , run_graph_async/4
         , complete_task/5
         , extend_graph/3
         , grab_resources/4
@@ -24,7 +25,7 @@
         , resources          :: task_graph_resource:state()
         , tasks_table        :: ets:tid()
         , event_mgr          :: pid()
-        , parent             :: pid()
+        , complete_callback  :: task_graph:complete_callback()
         , n_left             :: non_neg_integer()
         , success = true     :: boolean()
         , aborted = false    :: boolean()
@@ -38,9 +39,7 @@
         , result             :: undefined | {task_graph:result_type(), term()}
         }).
 
--type task_result() :: { task_graph:task_id()
-                       , {task_graph:result_type(), term()}
-                       }.
+-define(SHUTDOWN_TIMEOUT, 5000).
 
 -define(FAILED_VERTEX,
         { vertex
@@ -60,13 +59,6 @@
         , _result = '_'
         }).
 
--type event_mgr() :: atom()
-                   | {atom(), atom()}
-                   | {global, term()}
-                   | pid()
-                   | undefined
-                   .
-
 -define(TIMEOUT, infinity).
 
 %%%===================================================================
@@ -80,37 +72,26 @@
 -spec run_graph( atom()
                , task_graph:settings()
                , task_graph:digraph()
-               ) -> {ok, term()} | {error, term()} .
+               ) -> {ok, term()} | {error, term()}.
 run_graph(_, _, {[], _}) ->
     {ok, #{}};
 run_graph(TaskName, Settings, Tasks) ->
-    case maps:get(event_manager, Settings, undefined) of
-        EventMgr when is_pid(EventMgr) ->
-            ok;
-        undefined ->
-            {ok, EventMgr} = gen_event:start_link(),
-            lists:foreach( fun({Handler, Args}) ->
-                                   gen_event:add_handler(EventMgr, Handler, Args)
-                           end
-                         , maps:get(event_handlers, Settings, [])
-                         )
-    end,
-    Ret = gen_server:start( {local, TaskName}
-                          , ?MODULE
-                          , {TaskName, EventMgr, Settings, Tasks, self()}
-                          , []
-                          ),
-    case Ret of
+    Ref = make_ref(),
+    Parent = self(),
+    Fun = fun(Result) ->
+                  Parent ! {Ref, Result}
+          end,
+    ShutdownTimeout = maps:get(shutdown_timeout, Settings, ?SHUTDOWN_TIMEOUT),
+    case run_graph_async(TaskName, Settings, Tasks, Fun) of
         {ok, Pid} ->
-            Ref = monitor(process, Pid),
+            MRef = monitor(process, Pid),
             receive
-                {result, Pid, Result} ->
-                    gen_event:stop(EventMgr, normal, infinity),
+                {Ref, Result} ->
                     %% Make sure the server terminated:
                     receive
-                        {'DOWN', Ref, process, Pid, _} ->
+                        {'DOWN', MRef, process, Pid, _} ->
                             ok
-                    after 1000 ->
+                    after ShutdownTimeout ->
                             %% Should not happen
                             exit(Pid, kill),
                             error({timeout_waiting_for, Pid})
@@ -119,9 +100,21 @@ run_graph(TaskName, Settings, Tasks) ->
                 {'DOWN', Ref, process, Pid, Reason} ->
                     {error, {internal_error, Reason}}
             end;
-        Err ->
-            Err
+        Error ->
+            Error
     end.
+
+-spec run_graph_async( atom()
+                     , task_graph:settings()
+                     , task_graph:digraph()
+                     , task_graph:complete_callback()
+                     ) -> {ok, pid()} | {error, term()}.
+run_graph_async(TaskName, Settings, Tasks, CompleteCallback) ->
+    gen_server:start( {local, TaskName}
+                    , ?MODULE
+                    , {TaskName, Settings, Tasks, CompleteCallback}
+                    , []
+                    ).
 
 -spec complete_task( pid()
                    , task_graph:task_id()
@@ -169,21 +162,32 @@ grab_resources(Parent, Id, Rank, Resources) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-init({TaskName, EventMgr, Settings, Tasks, Parent}) ->
+init({TaskName, Settings, Tasks, CompleteCallback}) ->
     %% process_flag(trap_exit, true),
+    case maps:get(event_manager, Settings, undefined) of
+        EventMgr when is_pid(EventMgr) ->
+            ok;
+        undefined ->
+            {ok, EventMgr} = gen_event:start_link(),
+            lists:foreach( fun({Handler, Args}) ->
+                                   gen_event:add_handler(EventMgr, Handler, Args)
+                           end
+                         , maps:get(event_handlers, Settings, [])
+                         )
+    end,
     ResourceLimits = maps:get(resources, Settings, #{}),
     Resources = task_graph_resource:init_state(ResourceLimits),
     Tab = ets:new(TaskName, [{keypos, #vertex.id}, protected]),
-    State = #state{ settings    = Settings
-                  , tasks_table = Tab
-                  , resources   = Resources
-                  , parent      = Parent
-                  , event_mgr   = EventMgr
-                  , n_left      = 0
+    State = #state{ settings          = Settings
+                  , tasks_table       = Tab
+                  , resources         = Resources
+                  , complete_callback = CompleteCallback
+                  , event_mgr         = EventMgr
+                  , n_left            = 0
                   },
     do_extend_graph(Tasks, undefined, State).
 
-handle_call({abort, Reason}, From, State0) ->
+handle_call({abort, Reason}, _From, State0) ->
     State = do_abort_graph(Reason, State0),
     {reply, ok, State}.
 
@@ -222,7 +226,6 @@ handle_cast( {complete_task, From, Id, {ErrorType, ErrorMsg}, Resources, _}
 handle_cast( {complete_task, From, Id, {ok, Result}, Resources, NewTasks}
            , State0 = #state{ tasks_table = Tab
                             , n_left      = N
-                            , event_mgr   = EventMgr
                             , resources   = Res0
                             }
            ) ->
@@ -236,7 +239,7 @@ handle_cast( {complete_task, From, Id, {ok, Result}, Resources, NewTasks}
     State1 = State0#state{ n_left = N - 1
                          , resources = Res1
                          },
-    State2 = try_pop_tasks(free_resources(State1, Id)),
+    State2 = try_pop_tasks(State1),
     case do_extend_graph(NewTasks, undefined, State2) of
         {ok, State} ->
             case State#state.n_left of
@@ -267,8 +270,20 @@ handle_cast(_Cast, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, State) ->
-    ets:delete(State#state.tasks_table),
+terminate(_Reason, #state{ event_mgr = EventMgr
+                         , settings = Settings
+                         , tasks_table = Tab
+                         }) ->
+    ets:delete(Tab),
+    case Settings of
+        #{event_manager := _} ->
+            %% Event manager was started by someone else, don't touch it
+            ok;
+        _ ->
+            %% I spawned you, so I will kill you!
+            ShutdownTimeout = maps:get(shutdown_timeout, Settings, ?SHUTDOWN_TIMEOUT),
+            gen_event:stop(EventMgr, normal, ShutdownTimeout)
+    end,
     ok.
 
 code_change(_OldVsn, State, _Extra) ->
@@ -285,8 +300,6 @@ do_extend_graph( {Vertices0, Edges}
                , State = #state{ event_mgr   = EventMgr
                                , tasks_table = Tab
                                , n_left      = N0
-                               , settings    = Settings
-                               , resources   = RState
                                }
                ) ->
     %% FIXME: `ParentTaskId == undefined' will create all kind of mess here...
@@ -353,10 +366,6 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
         Err ->
             {error, Err}
     end.
-
--spec free_resources(#state{}, task_graph:task_id()) -> #state{}.
-free_resources(State, TaskId) ->
-    State.
 
 -spec try_pop_tasks(#state{}) -> #state{}.
 try_pop_tasks(State = #state{resources = Res0, tasks_table = Tab}) ->
@@ -455,7 +464,7 @@ is_acyclic({Vertices, Edges}, NewIds) ->
 is_task_complete(#vertex{result = R}) ->
     R =/= undefined.
 
-complete_graph(State = #state{ parent = Parent
+complete_graph(State = #state{ complete_callback = CompleteCallback
                              , success = Success
                              , tasks_table = Tab
                              }
@@ -470,5 +479,11 @@ complete_graph(State = #state{ parent = Parent
                       false ->
                           {error, Errors}
                   end,
-    Parent ! {result, self(), ReturnValue},
+    try
+        CompleteCallback(ReturnValue)
+    catch
+        _:Err ->
+            error_logger:error_msg("Complete callback failed"
+                                   " ~p for task graph ~p~n", [Err, self()])
+    end,
     {stop, normal, State}.

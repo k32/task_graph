@@ -1,3 +1,11 @@
+* 0.3.0
+** New API: =run_graph_async=
+It is now possible to run =task_graph= asynchronously.
+** New setting: =shutdown_timeout=
+It is new possible to specify how long =task_graph= shutdown sequence
+can run.
+** Bugfix:
+=task_graph= won't shutdown the event manager that wasn't started by it
 * 0.2.0
 ** Performance improvements
 Task graph now uses completely different, faster locking mechanism in

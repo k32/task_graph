@@ -7,6 +7,8 @@
 %% API
 -export([ run_graph/3
         , run_graph/2
+        , run_graph_async/4
+        , run_graph_async/3
         ]).
 
 
@@ -20,6 +22,8 @@
              , maybe/1
              , settings_key/0
              , settings/0
+             , result_type/0
+             , complete_callback/0
              ]).
 
 -type task_execute() :: atom() | task_runner:run().
@@ -45,9 +49,12 @@
                       | resources
                       | disable_guards
                       | keep_going
+                      | shutdown_timeout
                       .
 
 -type settings() :: #{settings_key() => term()}.
+
+-type complete_callback() :: fun(({result_type(), term()}) -> ok).
 
 %%--------------------------------------------------------------------
 %% @doc Execute task graph with default settings
@@ -84,6 +91,9 @@ run_graph(Name, Tasks) ->
 %%    `keep_going' is a boolean flag that allows all tasks to run even
 %%     in presense of errors. False by default
 %%
+%%    `shutdown_timeout' is a positive integer that indicates how long
+%%     task graph can run after reporting the result
+%%
 %% `Tasks' is a 2-tuple containing vertices and edges of the task
 %% graph, respectively. Vertices are represented by a list of
 %% ```#tg_task{}``` records. Task ids should be unique. Edges is a
@@ -94,6 +104,30 @@ run_graph(Name, Tasks) ->
 -spec run_graph( atom()
                , settings()
                , task_graph:digraph()
-               ) -> {ok, term()} | {error, term()}.
+               ) -> {result_type(), term()}.
 run_graph(Name, Settings, Tasks) ->
     task_graph_server:run_graph(Name, Settings, Tasks).
+
+
+%%--------------------------------------------------------------------
+%% @doc Asynchronous version of `run_graph' with default settings
+%%--------------------------------------------------------------------
+-spec run_graph_async( atom()
+                     , task_graph:digraph()
+                     , complete_callback()
+                     ) -> {ok, pid()}
+                        | {error, term()}.
+run_graph_async(Name, Tasks, Callback) ->
+    task_graph_server:run_graph_async(Name, #{}, Tasks, Callback).
+
+%%--------------------------------------------------------------------
+%% @doc Asynchronous version of `run_graph'
+%%--------------------------------------------------------------------
+-spec run_graph_async( atom()
+                     , settings()
+                     , task_graph:digraph()
+                     , complete_callback()
+                     ) -> {ok, pid()}
+                        | {error, term()}.
+run_graph_async(Name, Settings, Tasks, Callback) ->
+    task_graph_server:run_graph_async(Name, Settings, Tasks, Callback).
