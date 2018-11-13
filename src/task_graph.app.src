@@ -1,6 +1,6 @@
 {application, task_graph,
- [{description, "An OTP library"},
-  {vsn, "0.1.0"},
+ [{description, "task scheduler"},
+  {vsn, "0.3.0"},
   {registered, []},
   {applications,
    [kernel,
@@ -10,6 +10,6 @@
   {modules, []},
 
   {maintainers, []},
-  {licenses, ["Apache 2.0"]},
+  {licenses, ["public domain"]},
   {links, []}
  ]}.
