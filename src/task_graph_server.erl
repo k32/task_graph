@@ -368,7 +368,11 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
     end.
 
 -spec try_pop_tasks(#state{}) -> #state{}.
-try_pop_tasks(State = #state{resources = Res0, tasks_table = Tab}) ->
+try_pop_tasks(State = #state{ resources = Res0
+                            , tasks_table = Tab
+                            , event_mgr = EventMgr
+                            }) ->
+    event(shed_begin, EventMgr),
     {Tasks, Res1} = task_graph_resource:pop_alloc(Res0),
     lists:foreach( fun(TId) ->
                            Pid = ets:lookup_element(Tab, TId, #vertex.pid),
@@ -376,6 +380,7 @@ try_pop_tasks(State = #state{resources = Res0, tasks_table = Tab}) ->
                    end
                  , Tasks
                  ),
+    event(shed_end, EventMgr),
     State#state{resources = Res1}.
 
 -spec do_abort_graph(term(), #state{}) -> #state{}.
@@ -467,6 +472,7 @@ is_task_complete(#vertex{result = R}) ->
 complete_graph(State = #state{ complete_callback = CompleteCallback
                              , success = Success
                              , tasks_table = Tab
+                             , event_mgr = EventMgr
                              }
               ) ->
     Errors0 = ets:match(Tab, ?FAILED_VERTEX),
@@ -479,6 +485,7 @@ complete_graph(State = #state{ complete_callback = CompleteCallback
                       false ->
                           {error, Errors}
                   end,
+    event(complete_graph, EventMgr),
     try
         CompleteCallback(ReturnValue)
     catch
