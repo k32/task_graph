@@ -1,3 +1,10 @@
+* 0.4.0
+** Restored events from v0.1.0
+- =shed_begin=
+- =shed_end=
+- =complete_graph=
+** Added task top
+** Moved all dependencies to hex
 * 0.3.0
 ** New API: =run_graph_async=
 It is now possible to run =task_graph= asynchronously.

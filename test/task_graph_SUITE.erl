@@ -10,6 +10,7 @@
 %% Testcases:
 -export([ t_evt_draw_deps/1
         , t_evt_build_flow/1
+        , t_evt_top/1
         , t_topology_succ/1
         , t_topology/1
         , t_error_handling/1
@@ -34,6 +35,7 @@
 %%% Macros
 %%%===================================================================
 
+-include_lib("stdlib/include/assert.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("proper/include/proper.hrl").
 -include_lib("task_graph/src/task_graph_int.hrl").
@@ -292,6 +294,39 @@ t_evt_build_flow(_Config) ->
                     , [multiline, global, {return, binary}]
                     ),
     ok.
+
+t_evt_top(_Config) ->
+    Self = self(),
+    Callback = fun(Term) ->
+                       Self ! {top, Term}
+               end,
+    Opts = #{event_handlers =>
+                 [{task_graph_top, #{ callback => Callback
+                                    , n => 3
+                                    }}]},
+    NTasks = 10,
+    Tasks = [#tg_task{ id = I
+                     , execute =
+                           { fun(_, _, _) -> timer:sleep(100*(NTasks - I)) end
+                           , fun(_, _, _) -> timer:sleep(100*(NTasks - I)), changed end
+                           }
+                     , data = #{}
+                     }
+             || I <- lists:seq(1, NTasks)],
+    Deps = [],
+    {ok, _} = task_graph:run_graph(foo, Opts, {Tasks, Deps}),
+    receive
+      {top, Top} ->
+            ?assertMatch( #{ sheduling := _
+                           , extension := _
+                           , task_top  := [{1, _}, {2, _}, {3, _}]
+                           , guard_top := [{1, _}, {2, _}, {3, _}]
+                           }
+                        , Top
+                        )
+    after 1000 ->
+            exit(timeout)
+    end.
 
 t_guards(_Config) ->
     ?RUN_PROP(guards),

@@ -40,6 +40,10 @@ Sooner or later everyone wants to optimize their builds. =task_graph=
 comes with a few helpful tools:
 
 *** Dependency graph visualization
+Add =task_graph_draw_deps= event handler to the event handler list
+
+*** Task top
+Add =task_graph_top= event handler to the event handler list
 
 ** Painstakingly tested
 
