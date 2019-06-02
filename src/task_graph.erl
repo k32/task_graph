@@ -16,6 +16,7 @@
              , task/1
              , edge/0
              , edges/0
+             , digraph/1
              , digraph/0
              , task_id/0
              , resource_id/0
@@ -51,7 +52,9 @@
 
 -type edges() :: [edge()].
 
--type digraph() :: {[task()], edges()}.
+-type digraph(A) :: {[task(A)], edges()}.
+
+-type digraph() :: digraph().
 
 -type settings_key() :: event_manager
                       | event_handlers
