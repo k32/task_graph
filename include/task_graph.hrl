@@ -2,11 +2,10 @@
 -define(_TASK_GRAPH_HRL_, true).
 
 -record(tg_task,
-        { id             :: task_graph:task_id()
-        , execute        :: task_graph:task_execute()
-        , data           :: term()
-        , resources = [] :: [task_graph:resource_id()]
-                          | task_graph_resource:resources()
+        { id
+        , execute
+        , data
+        , resources = []
         }).
 
 -record(tg_event,

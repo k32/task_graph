@@ -13,6 +13,7 @@
 
 
 -export_type([ task/0
+             , task/1
              , edge/0
              , edges/0
              , digraph/0
@@ -30,7 +31,15 @@
 
 -type task_id() :: term().
 
--type task() :: #tg_task{}.
+-type task(A) ::
+        #tg_task{ id        :: task_graph:task_id()
+                , execute   :: task_graph:task_execute()
+                , data      :: A
+                , resources :: [task_graph:resource_id()]
+                             | task_graph_resource:resources()
+                }.
+
+-type task() :: task(term()).
 
 -type resource_id() :: atom() | number() | reference() | list().
 

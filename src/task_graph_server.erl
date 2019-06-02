@@ -350,10 +350,17 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
                      ),
         %% Check for invalid dependencies:
         lists:foreach( fun({From, To}) ->
+                               %% Check that `From' is either an existing vertex or one of the
+                               %% vertices being added
                                {A, B} = IsValidId(From),
                                A orelse B orelse throw({missing_dependency, From}),
+                               %% Now checking `To'...
                                {C, D} = IsValidId(To),
+                               %% Check that `To' does not introduce a new dependency for any of the
+                               %% existing tasks (except Parent). That would create a race condition
                                D andalso To =/= ParentTaskId andalso throw({time_paradox, From, To}),
+                               %% Check that the downstream task is found among the newly added
+                               %% vertices:
                                C orelse  To =:= ParentTaskId orelse throw({missing_consumer, To})
                        end
                      , Edges
