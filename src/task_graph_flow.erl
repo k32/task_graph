@@ -1,5 +1,4 @@
-%% Listens to task_graph events and formats dependency
-%% graph in dot format
+%% Listens to task_graph events and formats them
 -module(task_graph_flow).
 
 -behaviour(gen_event).
