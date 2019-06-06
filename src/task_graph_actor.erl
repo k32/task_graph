@@ -46,10 +46,9 @@
                 , task_graph:task()
                 , task_graph_runner:get_deps_result()
                 , #{}
-                ) ->
-                        {ok, Pid :: pid()} |
-                        ignore |
-                        {error, Error :: term()}.
+                ) -> {ok, Pid :: pid()} |
+                     ignore |
+                     {error, Error :: term()}.
 start_link(EventMgr, Task, GetResultFun, Settings) ->
     Attrs = [self(), Task, EventMgr, GetResultFun, Settings],
     gen_statem:start_link(?MODULE, Attrs, []).

@@ -74,7 +74,7 @@
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
                , task_graph:digraph()
-               ) -> {ok, term()} | {error, term()}.
+               ) -> {result_type(), term()}.
 run_graph(Name, Tasks) ->
     run_graph(Name, #{}, Tasks).
 
@@ -119,7 +119,6 @@ run_graph(Name, Tasks) ->
                ) -> {result_type(), term()}.
 run_graph(Name, Settings, Tasks) ->
     task_graph_server:run_graph(Name, Settings, Tasks).
-
 
 %%--------------------------------------------------------------------
 %% @doc Asynchronous version of `run_graph' with default settings

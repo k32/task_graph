@@ -21,42 +21,49 @@
 
 %% server state
 -record(state,
-        { settings           :: task_graph:settings()
-        , resources          :: task_graph_resource:state()
-        , tasks_table        :: ets:tid()
-        , event_mgr          :: pid()
-        , complete_callback  :: task_graph:complete_callback()
-        , n_left             :: non_neg_integer()
-        , success = true     :: boolean()
-        , aborted = false    :: boolean()
+        { settings          :: task_graph:settings()
+        , resources         :: task_graph_resource:state()
+        , tasks_table       :: ets:tid()
+        , event_mgr         :: pid()
+        , complete_callback :: task_graph:complete_callback()
+        , n_left            :: non_neg_integer()
+        , success = true    :: boolean()
+        , aborted = false   :: boolean()
         }).
 
 -record(vertex,
-        { id                 :: task_graph:task_id()
-        , pid                :: pid()
-        , task               :: #tg_task{}
-        , done = false       :: boolean()
-        , result             :: undefined | {task_graph:result_type(), term()}
+        { id
+        , pid
+        , task
+        , done = false
+        , result
         }).
+
+-type vertex() ::
+        #vertex
+        { id                :: task_graph:task_id()
+        , pid               :: pid()
+        , task              :: #tg_task{}
+        , done              :: boolean()
+        , result            :: undefined | {task_graph:result_type(), term()}
+        }.
 
 -define(SHUTDOWN_TIMEOUT, 5000).
 
 -define(FAILED_VERTEX,
-        { vertex
-        ,  _id    = '$1'
-        , _pid    = '_'
-        , _task   = '_'
-        , _done   = true
-        , _result = {error, '$2'}
+        #vertex
+        { id     = '$1'
+        , done   = true
+        , result = {error, '$2'}
+        , _      = '_'
         }).
 
 -define(ACTIVE_VERTEX,
-        { vertex
-        ,  _id    = '$1'
-        , _pid    = '$2'
-        , _task   = '_'
-        , _done   = false
-        , _result = '_'
+        #vertex
+        { id   = '$1'
+        , pid  = '$2'
+        , done = false
+        , _    = '_'
         }).
 
 -define(TIMEOUT, infinity).
@@ -69,6 +76,7 @@
 %% @doc
 %% @end
 %%--------------------------------------------------------------------
+
 -spec run_graph( atom()
                , task_graph:settings()
                , task_graph:digraph()
@@ -472,7 +480,7 @@ is_acyclic({Vertices, Edges}, NewIds) ->
         digraph:delete(DG)
     end.
 
--spec is_task_complete(#vertex{}) -> boolean().
+-spec is_task_complete(vertex()) -> boolean().
 is_task_complete(#vertex{result = R}) ->
     R =/= undefined.
 
