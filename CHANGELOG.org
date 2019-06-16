@@ -1,3 +1,14 @@
+* 0.5.0
+** Exeperimental futures support
+
+Edges defined as:
+
+#+BEGIN_SRC erlang
+{future, A, B}
+#+END_SRC
+
+are allowed to reference inexistent task id =A=.
+
 * 0.4.0
 ** Restored events from v0.1.0
 - =shed_begin=

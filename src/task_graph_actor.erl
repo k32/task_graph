@@ -14,15 +14,43 @@
         , abort/2
         , resources_acquired/1
         , rip/1
+        , get_states/1
         ]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, handle_event/4, init/1, terminate/3, code_change/4]).
 
+%%%===================================================================
+%%% Types
+%%%===================================================================
+
+-export_type([state/0]).
+
+%% States:
+%%
+%% 0. `startup' The task is waiting until `task_graph_server' provides
+%% it with the pids of upstream and downstram dependencies. This is
+%% the intial state.
+%%
+%% 1. `wait_deps' The task is waiting for the upstream dependencies to
+%% complete
+%%
+%% 2. `wait_resources' The task asked `task_graph_server' to grant
+%% resources and is waiting for the confirmation
+%%
+%% 3. `complete' The task is waiting for the `task_graph_server' to
+%% record its return value
+%%
+-type state() :: startup
+               | wait_deps
+               | wait_resources
+               | complete
+               .
+
 -record(d,
         { id                         :: task_graph:task_id()
         , data                       :: term()
-        , requires = #{}             :: #{task_graph:task_id() => pid()}
+        , requires = #{}             :: #{task_graph:task_id() => pid() | future}
         , provides = #{}             :: #{task_graph:task_id() => pid()}
         , exec_fun                   :: fun()
         , n_deps = 0                 :: non_neg_integer()
@@ -74,6 +102,11 @@ rip(Pid) ->
 -spec resources_acquired(pid()) -> ok.
 resources_acquired(Pid) ->
     gen_statem:cast(Pid, resources_acquired).
+
+-spec get_states([pid()]) -> [state()].
+get_states(Pids) ->
+    %% TODO
+    [].
 
 %%%===================================================================
 %%% gen_statem callbacks

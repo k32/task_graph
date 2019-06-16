@@ -108,9 +108,9 @@ run_graph(Name, Tasks) ->
 %%
 %% `Tasks' is a 2-tuple containing vertices and edges of the task
 %% graph, respectively. Vertices are represented by a list of
-%% ```#tg_task{}``` records. Task ids should be unique. Edges is a
+%% `#tg_task{}' records. Task ids must be unique. Edges is a
 %% list of 2-tuples where first element blocks execution of the second
-%% one.
+%% one
 %%
 %%--------------------------------------------------------------------
 -spec run_graph( atom()

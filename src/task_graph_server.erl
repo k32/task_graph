@@ -19,6 +19,8 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
+-type future() :: {task_graph:task_id(), pid()}.
+
 %% server state
 -record(state,
         { settings          :: task_graph:settings()
@@ -29,6 +31,8 @@
         , n_left            :: non_neg_integer()
         , success = true    :: boolean()
         , aborted = false   :: boolean()
+        %% List of tasks directly dependent on a future:
+        , futures = #{}     :: #{task_graph:task_id() => future()}
         }).
 
 -record(vertex,
@@ -52,18 +56,18 @@
 
 -define(FAILED_VERTEX,
         #vertex
-        { id     = '$1'
-        , done   = true
-        , result = {error, '$2'}
-        , _      = '_'
+        { id      = '$1'
+        , done    = true
+        , result  = {error, '$2'}
+        , _       = '_'
         }).
 
 -define(ACTIVE_VERTEX,
         #vertex
-        { id   = '$1'
-        , pid  = '$2'
-        , done = false
-        , _    = '_'
+        { id      = '$1'
+        , pid     = '$2'
+        , done    = false
+        , _       = '_'
         }).
 
 -define(TIMEOUT, infinity).
@@ -192,6 +196,7 @@ init({TaskName, Settings, Tasks, CompleteCallback}) ->
                   , complete_callback = CompleteCallback
                   , event_mgr         = EventMgr
                   , n_left            = 0
+                  , futures           = #{}
                   },
     do_extend_graph(Tasks, undefined, State).
 
@@ -305,10 +310,10 @@ do_extend_graph(undefined, _, State) ->
     {ok, State};
 do_extend_graph( {Vertices0, Edges}
                , ParentTaskId
-               , State = #state{ event_mgr   = EventMgr
-                               , tasks_table = Tab
-                               , n_left      = N0
-                               }
+               , State0 = #state{ event_mgr   = EventMgr
+                                , tasks_table = Tab
+                                , n_left      = N0
+                                }
                ) ->
     %% FIXME: `ParentTaskId == undefined' will create all kind of mess here...
     event(extend_begin, EventMgr),
@@ -317,8 +322,8 @@ do_extend_graph( {Vertices0, Edges}
     event(add_dependencies, Edges, EventMgr),
     case do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) of
         ok ->
-            {NNew, Pids} = add_vertices(State, ParentTaskId, Vertices),
-            add_edges(Tab, Edges),
+            {NNew, Pids} = add_vertices(State0, ParentTaskId, Vertices),
+            State = add_edges(State0, Edges),
             lists:foreach(fun(Pid) -> task_graph_actor:launch(Pid) end, Pids),
             case ParentTaskId of
                 undefined ->
@@ -336,34 +341,24 @@ do_extend_graph( {Vertices0, Edges}
 do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
     try
         NewIds = map_sets:from_list([Id || #tg_task{id = Id} <- Vertices]),
-        IsValidId = fun(Id) ->
-                            { map_sets:is_element(Id, NewIds)
-                            , ets:member(Tab, Id)
-                            }
-                    end,
-        %% Check for duplicate tasks:
-        lists:foreach( fun(T = #tg_task{id = Id}) ->
-                               case ets:lookup(Tab, Id) of
-                                   [] ->
-                                       ok;
-                                   [#vertex{task = T}] ->
-                                       %% New task definition is the
-                                       %% same, I'll allow it
-                                       ok;
-                                   _ ->
-                                       throw({duplicate_task, Id})
-                               end
-                       end
-                     , Vertices
-                     ),
+        IsExistingId = fun(Id) ->
+                               { map_sets:is_element(Id, NewIds)
+                               , ets:member(Tab, Id)
+                               }
+                       end,
+        check_duplicate_tasks(Tab, Vertices),
         %% Check for invalid dependencies:
-        lists:foreach( fun({From, To}) ->
+        lists:foreach( fun(Edge) ->
+                               Future = case Edge of
+                                            {From, To}         -> false;
+                                            {future, From, To} -> true
+                                        end,
                                %% Check that `From' is either an existing vertex or one of the
-                               %% vertices being added
-                               {A, B} = IsValidId(From),
-                               A orelse B orelse throw({missing_dependency, From}),
+                               %% vertices being added, unless the edge is defined as a `future'
+                               {A, B} = IsExistingId(From),
+                               Future orelse A orelse B orelse throw({missing_dependency, From}),
                                %% Now checking `To'...
-                               {C, D} = IsValidId(To),
+                               {C, D} = IsExistingId(To),
                                %% Check that `To' does not introduce a new dependency for any of the
                                %% existing tasks (except Parent). That would create a race condition
                                D andalso To =/= ParentTaskId andalso throw({time_paradox, From, To}),
@@ -381,6 +376,23 @@ do_analyse_graph({Vertices, Edges}, ParentTaskId, Tab) ->
         Err ->
             {error, Err}
     end.
+
+
+-spec check_duplicate_tasks(ets:tid(), [task_graph:task()]) -> ok.
+check_duplicate_tasks(Tab, Tasks) ->
+    Fun = fun(T = #tg_task{id = Id}) ->
+                  case ets:lookup(Tab, Id) of
+                      [] ->
+                          ok;
+                      [#vertex{task = T}] ->
+                          %% New task definition is the same, I'll
+                          %% allow it
+                          ok;
+                      _ ->
+                          throw({duplicate_task, Id})
+                  end
+          end,
+    lists:foreach(Fun, Tasks).
 
 -spec try_pop_tasks(#state{}) -> #state{}.
 try_pop_tasks(State = #state{ resources = Res0
@@ -416,6 +428,7 @@ add_vertices(State, ParentTaskId, Vertices) ->
           , event_mgr = EventMgr
           , settings = Settings
           , resources = RState
+          , futures = Futures
           } = State,
     GetDepResult =
         fun(Id) ->
@@ -428,7 +441,7 @@ add_vertices(State, ParentTaskId, Vertices) ->
         end,
     lists:foldl( fun(#tg_task{id = Id}, {N, Acc}) when Id =:= ParentTaskId ->
                          {N, Acc};
-                    (Task0, {N, Acc}) ->
+                    (Task0 = #tg_task{id = Id}, {N, Acc}) ->
                          Resources =
                              task_graph_resource:to_resources( RState
                                                              , Task0#tg_task.resources
@@ -440,41 +453,79 @@ add_vertices(State, ParentTaskId, Vertices) ->
                                                                 , GetDepResult
                                                                 , Settings
                                                                 ),
-                         ets:insert_new(Tab, #vertex{ id = Task#tg_task.id
+                         ets:insert_new(Tab, #vertex{ id = Id
                                                     , task = Task
                                                     , pid = Pid
                                                     }),
+                         fulfill_promises(State, Id, Pid),
                          {N + 1, [Pid|Acc]}
                  end
                , {0, []}
                , Vertices
                ).
 
--spec add_edges(ets:tid(), task_graph:edges()) -> ok.
-add_edges(Tab, Edges) ->
-    lists:foreach( fun({From, To}) ->
-                           [Vtx = #vertex{pid = PFrom}] = ets:lookup(Tab, From),
-                           case is_task_complete(Vtx) of
-                               false ->
-                                   [#vertex{pid = PTo}] = ets:lookup(Tab, To),
-                                   task_graph_actor:add_consumer(PFrom, To, PTo),
-                                   task_graph_actor:add_requirement(PTo, From, PFrom);
-                               true ->
-                                   ok
-                           end
-                   end
-                 , Edges
-                 ).
+-spec add_edges(#state{}, task_graph:edges()) -> #state{}.
+add_edges(State0, Edges) ->
+    #state{tasks_table = Tab, futures = Futures} = State0,
+    Fun = fun(Edge, Acc) ->
+                  {From, To} = endpoints(Edge),
+                  FromComplete =
+                      case ets:lookup(Tab, From) of
+                          [Vtx = #vertex{pid = PFrom}] ->
+                              is_task_complete(Vtx);
+                          [] ->
+                              PFrom = future
+                      end,
+                  case FromComplete of
+                      false ->
+                          [#vertex{pid = PTo}] = ets:lookup(Tab, To),
+                          task_graph_actor:add_consumer(PFrom, To, PTo),
+                          task_graph_actor:add_requirement(PTo, From, PFrom),
+                          Acc;
+                      true ->
+                          Acc;
+                      future ->
+                          [#vertex{pid = PTo}] = ets:lookup(Tab, To),
+                          task_graph_actor:add_requirement(PTo, From, PFrom),
+                          maps:update_with( From
+                                          , fun(L) -> [{To, PTo}|L] end
+                                          , [{To, PTo}]
+                                          , Acc
+                                          )
+                  end
+          end,
+    NewFutures = lists:foldl(Fun, Futures, Edges),
+    State0#state{ futures = NewFutures
+                }.
+
+-spec fulfill_promises( #state{}
+                      , task_graph:task_id()
+                      , pid()
+                      ) -> ok.
+fulfill_promises( #state{ futures = Futures
+                        , event_mgr = EventMgr
+                        }
+                , From
+                , PFrom
+                ) ->
+    Fun = fun({To, PTo}) ->
+                  task_graph_actor:add_consumer(PFrom, To, PTo),
+                  event(promise_fulfilled, {From, To}, EventMgr)
+          end,
+    lists:foreach(Fun, maps:get(From, Futures, [])).
 
 -spec is_acyclic(task_graph:digraph(), [task_graph:task_id()]) -> boolean().
 is_acyclic({Vertices, Edges}, NewIds) ->
     DG = digraph:new(),
     try
         [digraph:add_vertex(DG, Id) || #tg_task{id = Id} <- Vertices],
-        [digraph:add_edge(DG, From, To)
-         || {From, To} <- Edges
-                        , map_sets:is_element(From, NewIds)
-        ],
+        [begin
+             {From, To} = endpoints(Edge),
+             case map_sets:is_element(From, NewIds) of
+                 true  -> digraph:add_edge(DG, From, To);
+                 false -> ok
+             end
+         end || Edge <- Edges],
         digraph_utils:is_acyclic(DG)
     after
         digraph:delete(DG)
@@ -509,3 +560,8 @@ complete_graph(State = #state{ complete_callback = CompleteCallback
                                    " ~p for task graph ~p~n", [Err, self()])
     end,
     {stop, normal, State}.
+
+endpoints(Edge = {_, _}) ->
+    Edge;
+endpoints({future, From, To}) ->
+    {From, To}.
