@@ -9,6 +9,7 @@
         , run_graph/2
         , run_graph_async/4
         , run_graph_async/3
+        , endpoints/1
         ]).
 
 
@@ -16,6 +17,7 @@
              , task/1
              , edge/0
              , edges/0
+             , digraph/1
              , digraph/0
              , task_id/0
              , resource_id/0
@@ -47,11 +49,14 @@
 
 -type result_type() :: ok | error | aborted.
 
--type edge() :: {task_id(), task_id()}.
+-type edge() :: {task_id(), task_id()}
+              | {future, task_id(), task_id()}.
 
 -type edges() :: [edge()].
 
--type digraph() :: {[task()], edges()}.
+-type digraph(A) :: {[task(A)], edges()}.
+
+-type digraph() :: digraph().
 
 -type settings_key() :: event_manager
                       | event_handlers
@@ -71,7 +76,7 @@
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
                , task_graph:digraph()
-               ) -> {ok, term()} | {error, term()}.
+               ) -> {result_type(), term()}.
 run_graph(Name, Tasks) ->
     run_graph(Name, #{}, Tasks).
 
@@ -105,9 +110,9 @@ run_graph(Name, Tasks) ->
 %%
 %% `Tasks' is a 2-tuple containing vertices and edges of the task
 %% graph, respectively. Vertices are represented by a list of
-%% ```#tg_task{}``` records. Task ids should be unique. Edges is a
+%% `#tg_task{}' records. Task ids must be unique. Edges is a
 %% list of 2-tuples where first element blocks execution of the second
-%% one.
+%% one
 %%
 %%--------------------------------------------------------------------
 -spec run_graph( atom()
@@ -116,7 +121,6 @@ run_graph(Name, Tasks) ->
                ) -> {result_type(), term()}.
 run_graph(Name, Settings, Tasks) ->
     task_graph_server:run_graph(Name, Settings, Tasks).
-
 
 %%--------------------------------------------------------------------
 %% @doc Asynchronous version of `run_graph' with default settings
@@ -140,3 +144,12 @@ run_graph_async(Name, Tasks, Callback) ->
                         | {error, term()}.
 run_graph_async(Name, Settings, Tasks, Callback) ->
     task_graph_server:run_graph_async(Name, Settings, Tasks, Callback).
+
+%%--------------------------------------------------------------------
+%% @doc Get edpoints of an edge
+%%--------------------------------------------------------------------
+-spec endpoints(edge()) -> {task_id(), task_id()}.
+endpoints(Edge = {_, _}) ->
+    Edge;
+endpoints({future, From, To}) ->
+    {From, To}.

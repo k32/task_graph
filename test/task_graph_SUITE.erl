@@ -3,8 +3,11 @@
 %% Common test callbacks:
 -export([ suite/0
         , all/0
+        , groups/0
         , init_per_testcase/2
         , end_per_testcase/2
+        , init_per_group/2
+        , end_per_group/2
         ]).
 
 %% Testcases:
@@ -49,7 +52,7 @@
 -define(EXPAND_STATS_TABLE, tg_SUITE_stats_ext_table).
 -define(STATS_RESOLUTION, 200).
 
--define(RUN_PROP(PROP, SIZE),
+-define(RUN_PROP(PROP, Config, SIZE),
         begin
             %% Workaround against CT's "wonderful" features:
             OldGL = group_leader(),
@@ -57,10 +60,10 @@
             T0 = erlang:system_time(?tg_timeUnit),
             io:format(user, ??PROP, []),
             catch ets:delete(?SHEDULE_STATS_TABLE),
-            ets:new(?SHEDULE_STATS_TABLE, [named_table]),
+            ets:new(?SHEDULE_STATS_TABLE, [named_table, public]),
             catch ets:delete(?EXPAND_STATS_TABLE),
-            ets:new(?EXPAND_STATS_TABLE,  [named_table]),
-            Result = proper:quickcheck( PROP()
+            ets:new(?EXPAND_STATS_TABLE,  [named_table, public]),
+            Result = proper:quickcheck( ?TIMEOUT(5000, PROP(Config))
                                       , [ {numtests, ?NUMTESTS}
                                         , {max_size, SIZE}
                                         ]
@@ -72,7 +75,7 @@
             true = Result
         end).
 
--define(RUN_PROP(PROP), ?RUN_PROP(PROP, ?SIZE)).
+-define(RUN_PROP(PROP, Config), ?RUN_PROP(PROP, Config, ?SIZE)).
 
 %%%===================================================================
 %%% Testcases and properties
@@ -80,12 +83,13 @@
 
 %% Test that dependencies are resolved in a correct order and all
 %% tasks are executed for any proper acyclic graph
-t_topology_succ(_Config) ->
-    ?RUN_PROP(topology_succ),
+t_topology_succ(Config) ->
+    ?RUN_PROP(topology_succ, Config),
     ok.
 
-topology_succ() ->
-    ?FORALL(DAG, dag(),
+topology_succ(Config) ->
+    EdgeT = proplists:get_value(edge_t, Config, false),
+    ?FORALL(DAG, dag(default, EdgeT),
             begin
                 Opts = #{event_handlers => [send_back()]},
                 {ok, _} = task_graph:run_graph(foo, Opts, DAG),
@@ -96,11 +100,11 @@ topology_succ() ->
             end).
 
 %% Test that all dynamic tasks are executed in a correct order
-t_deferred(_Config) ->
-    ?RUN_PROP(deferred, 100),
+t_deferred(Config) ->
+    ?RUN_PROP(deferred, Config, 100),
     ok.
 
-deferred() ->
+deferred(_Config) ->
     ?FORALL(DAG0, dag(inject_deferred()),
             begin
                 {Vertices0, Edges} = DAG0,
@@ -124,11 +128,11 @@ deferred() ->
             end).
 
 %% Test that cyclic dependencies can be detected
-t_topology(_Config) ->
-    ?RUN_PROP(topology),
+t_topology(Config) ->
+    ?RUN_PROP(topology, Config),
     ok.
 
-topology() ->
+topology(_Config) ->
     ?FORALL(L0, list({nat(), nat()}),
             begin
                 %% Shrink vertex space a little to get more interesting graphs:
@@ -141,7 +145,8 @@ topology() ->
                                end
                              , Vertices
                              ),
-                lists:foreach( fun({From, To}) ->
+                lists:foreach( fun(Edge) ->
+                                       {From, To} = task_graph:endpoints(Edge),
                                        digraph:add_edge(DG, From, To)
                                end
                              , Edges
@@ -162,11 +167,11 @@ topology() ->
             end).
 
 %% Check that errors in the tasks are reported
-t_error_handling(_Config) ->
-    ?RUN_PROP(error_handling),
+t_error_handling(Config) ->
+    ?RUN_PROP(error_handling, Config),
     ok.
 
-error_handling() ->
+error_handling(_Config) ->
     ?FORALL(DAG, dag(inject_errors()),
             ?IMPLIES(expected_errors(DAG) /= [],
             begin
@@ -193,13 +198,12 @@ t_keep_going(_Config) ->
     N = length(events_of_kind([spawn_task], Events)),
     ok.
 
-
 %% Check that resource constraints are respected
-t_resources(_Config) ->
-    ?RUN_PROP(resources),
+t_resources(Config) ->
+    ?RUN_PROP(resources, Config),
     ok.
 
-resources() ->
+resources(_Config) ->
     MaxCapacity = 20,
     MaxNumberOfResorces = 10,
     ?FORALL(
@@ -328,12 +332,13 @@ t_evt_top(_Config) ->
             exit(timeout)
     end.
 
-t_guards(_Config) ->
-    ?RUN_PROP(guards),
+t_guards(Config) ->
+    ?RUN_PROP(guards, Config),
     ok.
 
-guards() ->
-    ?FORALL(DAG, dag({guard, boolean()}),
+guards(Config) ->
+    EdgeT = proplists:get_value(edge_t, Config, false),
+    ?FORALL(DAG, dag({guard, boolean()}, EdgeT),
             begin
                 Opts = #{event_handlers => [send_back()]},
                 {ok, _} = task_graph:run_graph(foo, Opts, DAG),
@@ -366,11 +371,11 @@ t_no_guards(_Config) ->
     [ok] = [ok || #tg_event{kind = spawn_task, data = 0} <- Events],
     ok.
 
-proper_only() ->
+proper_only(_Config) ->
     ?FORALL(DAG, dag({guard, boolean()}), true).
 
-t_proper_only(_Config) ->
-    ?RUN_PROP(proper_only),
+t_proper_only(Config) ->
+    ?RUN_PROP(proper_only, Config),
     ok.
 
 %%%===================================================================
@@ -379,20 +384,27 @@ t_proper_only(_Config) ->
 
 %% Proper generator of directed acyclic graphs:
 dag() ->
-    dag(default).
-%% ...supply custom data to tasks (`Payload' is a proper generator)
+    dag(default, false).
 dag(Payload) ->
-    dag(Payload, 2, 4).
+    dag(Payload, false).
+%% ...supply custom data to tasks and edges (where `Payload' and
+%% `EdgeT' are proper generators)
+dag(Payload, EdgeT) ->
+    dag(Payload, EdgeT, 2, 4).
 %% ...adjust magic parameters X and Y governing graph topology:
-dag(Payload, X, Y) ->
-    ?LET(Mishmash, list({{nat(), nat()}, {Payload, Payload}}),
+dag(Payload, EdgeT, X, Y) ->
+    ?LET(Mishmash, list({{EdgeT, nat(), nat()}, {Payload, Payload}}),
           begin
               {L0, Data0} = lists:unzip(Mishmash), %% Separate vertex IDs and data
               %% Shrink vertex space to get more interesting graphs:
-              L = [{N div X, M div Y} || {N, M} <- L0],
-              Edges = [{N, N + M} || {N, M} <- L, M>0],
-              Singletons = [N || {N, 0} <- L],
-              Vertices = lists:usort( lists:append([tuple_to_list(I) || I <- Edges]) ++
+              L = [{Future, N div X, M div Y} || {Future, N, M} <- L0],
+              Edges = [case Future of
+                           true -> {future, N, N + M};
+                           false -> {N, N + M}
+                       end || {Future, N, M} <- L, M > 0],
+              Singletons = [N || {_, N, 0} <- L],
+              Vertices = lists:usort( lists:append([tuple_to_list(task_graph:endpoints(E))
+                                                    || E <- Edges]) ++
                                       Singletons
                                     ),
               Data = lists:sublist( lists:append([tuple_to_list(I) || I <- Data0])
@@ -481,7 +493,7 @@ push_event_duration(K1, K2, Table, Key, Events) ->
       [] ->
           OldVals = []
     end,
-    ets:insert(Table, {Key, [Dt] ++ OldVals}).
+    ets:insert(Table, {Key, [Dt | OldVals]}).
 
 events_of_kind(Kinds, Events) ->
     [E || E = #tg_event{kind = Kind} <- Events, lists:member(Kind, Kinds)].
@@ -495,7 +507,8 @@ collect_all_tasks({Vertices, Edges}, Acc0) ->
                                        || Task <- Vertices
                                       ])
                      ),
-    Acc2 = lists:foldl( fun({From, To}, Acc) ->
+    Acc2 = lists:foldl( fun(Edge, Acc) ->
+                                {From, To} = task_graph:endpoints(Edge),
                                 AddDeps =
                                     fun({T, Old}) when is_map(Old) ->
                                             {T, map_sets:add_element(From, Old)}
@@ -672,10 +685,20 @@ suite() ->
 init_per_testcase(_, Config) ->
     Config.
 
+init_per_group(simple_futures, Config) ->
+    [{edge_t, boolean()} | Config].
+
+end_per_group(_, Config) ->
+    Config.
+
 end_per_testcase(_, Config) ->
     Config.
 
+groups() ->
+    [{simple_futures, [], [t_topology_succ, t_guards]}].
+
 all() ->
+    [{group, element(1, I)} || I <- groups()] ++
     [F || {F, _A} <- module_info(exports),
           case atom_to_list(F) of
               "t_" ++ _ -> true;
