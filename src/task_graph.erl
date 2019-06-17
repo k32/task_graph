@@ -9,6 +9,7 @@
         , run_graph/2
         , run_graph_async/4
         , run_graph_async/3
+        , endpoints/1
         ]).
 
 
@@ -48,7 +49,8 @@
 
 -type result_type() :: ok | error | aborted.
 
--type edge() :: {task_id(), task_id()}.
+-type edge() :: {task_id(), task_id()}
+              | {future, task_id(), task_id()}.
 
 -type edges() :: [edge()].
 
@@ -142,3 +144,12 @@ run_graph_async(Name, Tasks, Callback) ->
                         | {error, term()}.
 run_graph_async(Name, Settings, Tasks, Callback) ->
     task_graph_server:run_graph_async(Name, Settings, Tasks, Callback).
+
+%%--------------------------------------------------------------------
+%% @doc Get edpoints of an edge
+%%--------------------------------------------------------------------
+-spec endpoints(edge()) -> {task_id(), task_id()}.
+endpoints(Edge = {_, _}) ->
+    Edge;
+endpoints({future, From, To}) ->
+    {From, To}.

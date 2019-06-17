@@ -468,7 +468,7 @@ add_vertices(State, ParentTaskId, Vertices) ->
 add_edges(State0, Edges) ->
     #state{tasks_table = Tab, futures = Futures} = State0,
     Fun = fun(Edge, Acc) ->
-                  {From, To} = endpoints(Edge),
+                  {From, To} = task_graph:endpoints(Edge),
                   FromComplete =
                       case ets:lookup(Tab, From) of
                           [Vtx = #vertex{pid = PFrom}] ->
@@ -520,7 +520,7 @@ is_acyclic({Vertices, Edges}, NewIds) ->
     try
         [digraph:add_vertex(DG, Id) || #tg_task{id = Id} <- Vertices],
         [begin
-             {From, To} = endpoints(Edge),
+             {From, To} = task_graph:endpoints(Edge),
              case map_sets:is_element(From, NewIds) of
                  true  -> digraph:add_edge(DG, From, To);
                  false -> ok
@@ -560,8 +560,3 @@ complete_graph(State = #state{ complete_callback = CompleteCallback
                                    " ~p for task graph ~p~n", [Err, self()])
     end,
     {stop, normal, State}.
-
-endpoints(Edge = {_, _}) ->
-    Edge;
-endpoints({future, From, To}) ->
-    {From, To}.
